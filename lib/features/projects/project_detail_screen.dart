@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:dio/dio.dart';
 import 'dart:ui';
 import '../../app/app.dart';
 import '../../core/commands/command_library.dart';
@@ -31,6 +32,8 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   Color _projectColor = AppColors.primary;
   bool _isConnected = true;
   String _projectApiKey = '';
+  String _backendUrl = '';
+  String _backendType = 'generic';
 
   final List<_Member> _members = [
     _Member(name: 'Bot', initials: 'BOT', color: Color(0xFF55EFC4), isOnline: true, isBot: true),
@@ -57,7 +60,9 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         _projectName = name;
         _projectInitials = name.split(' ').where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join().toUpperCase();
         _projectApiKey = (p['api_key'] as String?) ?? '';
+        _backendUrl = (p['backend_url'] as String?) ?? '';
         _projectColor = colors[hash.abs() % colors.length];
+        _backendType = _backendUrl.contains('supabase') ? 'supabase' : 'generic';
       });
     }
     final msgs = await _backend.getMessages(widget.projectId);
@@ -874,27 +879,46 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       setState(() { _isTyping = false; });
       return;
     }
-    Future.delayed(const Duration(milliseconds: 1500), () async {
-      if (!mounted) return;
-      String response;
-      if (command.startsWith('/')) {
+
+    // Slash commands (local only)
+    if (command.startsWith('/')) {
+      Future.delayed(const Duration(milliseconds: 800), () async {
+        if (!mounted) return;
+        String response;
         final cmd = CommandLibrary.findCommand(command);
-        response = cmd != null ? cmd.execute(cmd.currentParams) : '❌ Commande inconnue : "$command"\n\nTapez /help pour voir les commandes disponibles.';
-      } else {
-        final msgs = await _backend.getMessages(widget.projectId);
-        final lower = command.toLowerCase();
-        if (lower.contains('health') || lower.contains('status')) {
-          response = '✅ Backend status: All systems operational.\n• API: Online (200 OK)\n• Database: Connected\n• Uptime: 99.98%';
-        } else if (lower.contains('help') || lower.contains('aide')) {
-          response = '🤖 Commandes disponibles:\n/status - État du système\n/deploy - Déployer\n/logs - Voir les logs\n/endpoints - API Routes\n/test - Tests\n/stats - Statistiques';
-        } else if (lower.contains('log') || lower.contains('erreur')) {
-          response = '📋 Logs récents:\n• [INFO] Request handled - 200 OK\n• [WARN] Slow query (1.2s)\n• [INFO] Cache hit: 94%\nAucune erreur critique.';
-        } else if (lower.contains('deploy')) {
-          response = '🚀 Déploiement lancé...\n• Build...\n• Tests...\n• Production...\n✅ Déploiement réussi!';
+        if (cmd != null) {
+          response = cmd.execute(cmd.currentParams);
         } else {
-          response = '💡 Commande reçue: "$command"\n\nTapez /help pour voir les commandes disponibles.';
+          final lower = command.toLowerCase();
+          if (lower == '/help' || lower == '/aide') {
+            response = '🤖 Commandes Prone:\n\n/status - Vérifier le backend\n/test - Tester la connexion\n/tables - Lister les tables\n/help - Aide\n\n💡 Commandes backend (requêtes HTTP):\nGET /produits - Lire des données\nPOST /produits - Créer une ressource\nPUT /produits?id=1 - Modifier\nDELETE /produits?id=1 - Supprimer\n\n📝 Requête Supabase:\nGET /produits?select=*&statut=eq.published\nGET /produits?select=nom,prix&limit=5';
+          } else if (lower == '/status' || lower == '/test') {
+            response = await _checkBackendStatus();
+          } else if (lower == '/tables') {
+            response = await _listTables();
+          } else {
+            response = '❌ Commande inconnue: "$command"\n\nTapez /help pour voir les commandes disponibles.';
+          }
         }
-      }
+        _backend.sendMessage(widget.projectId, response, sender: 'bot').catchError((_) => <String, dynamic>{'error': true});
+        if (!mounted) return;
+        setState(() {
+          _isTyping = false;
+          _messages.add(_ChatMessage(sender: _members.first, text: response, timestamp: DateTime.now()));
+        });
+        if (_scrollController.hasClients) {
+          _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+        }
+      });
+      return;
+    }
+
+    // Backend HTTP requests
+    final lower = command.toLowerCase().trim();
+
+    // Handle help keywords
+    if (lower.contains('help') || lower.contains('aide')) {
+      final response = '🤖 Commandes disponibles:\n/status - Vérifier le backend\n/test - Tester la connexion\n/tables - Lister les tables\n/help - Aide\n\n💡 Requêtes HTTP:\nGET /produits - Lire\nPOST /produits - Créer\nPUT /produits?id=1 - Modifier\nDELETE /produits?id=1 - Supprimer\n\n📝 Requête Supabase:\nGET /produits?select=*&statut=eq.published';
       _backend.sendMessage(widget.projectId, response, sender: 'bot').catchError((_) => <String, dynamic>{'error': true});
       if (!mounted) return;
       setState(() {
@@ -904,7 +928,238 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       if (_scrollController.hasClients) {
         _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
       }
-    });
+      return;
+    }
+
+    // Parse HTTP request: METHOD /path?params
+    String method = 'GET';
+    String path = command.trim();
+    Map<String, dynamic>? body;
+
+    final upper = command.toUpperCase().trim();
+    if (upper.startsWith('GET ') || upper.startsWith('POST ') || upper.startsWith('PUT ') || upper.startsWith('DELETE ') || upper.startsWith('PATCH ')) {
+      final parts = command.trim().split(RegExp(r'\s+'));
+      method = parts[0].toUpperCase();
+      path = parts.length > 1 ? parts[1] : '/';
+      if (parts.length > 2) {
+        try {
+          body = Map<String, dynamic>.from(_parseJsonOrQuery(parts.sublist(2).join(' ')));
+        } catch (_) {}
+      }
+    } else if (command.startsWith('{') || command.startsWith('[')) {
+      method = 'POST';
+      path = '/';
+      try {
+        body = Map<String, dynamic>.from(_parseJsonOrQuery(command));
+      } catch (_) {}
+    }
+
+    if (_backendUrl.isEmpty) {
+      final response = '⚠️ Aucun backend configuré.\n\nAllez dans les paramètres du projet ou créez un projet avec une URL de backend.\n\nExemple: https://xjckbqbqxcwzcrlmuvzf.supabase.co';
+      _backend.sendMessage(widget.projectId, response, sender: 'bot').catchError((_) => <String, dynamic>{'error': true});
+      if (!mounted) return;
+      setState(() {
+        _isTyping = false;
+        _messages.add(_ChatMessage(sender: _members.first, text: response, timestamp: DateTime.now()));
+      });
+      return;
+    }
+
+    // Execute HTTP request
+    _executeHttpRequest(method, path, body, command);
+  }
+
+  dynamic _parseJsonOrQuery(String text) {
+    text = text.trim();
+    if (text.startsWith('{') || text.startsWith('[')) {
+      return text; // raw JSON
+    }
+    // Parse query params like name=foo&price=100
+    final params = <String, dynamic>{};
+    for (final part in text.split('&')) {
+      final kv = part.split('=');
+      if (kv.length == 2) {
+        params[kv[0]] = kv[1];
+      }
+    }
+    return params;
+  }
+
+  Future<void> _executeHttpRequest(String method, String path, Map<String, dynamic>? body, String rawCommand) async {
+    try {
+      final dio = Dio();
+      String baseUrl = _backendUrl.replaceAll(RegExp(r'/+$'), '');
+
+      // Supabase REST API (PostgREST)
+      if (_backendType == 'supabase') {
+        if (!path.startsWith('/')) path = '/$path';
+        // Supabase uses /rest/v1/ prefix
+        if (!path.contains('/rest/v1')) {
+          path = '/rest/v1$path';
+        }
+      }
+
+      final url = '$baseUrl$path';
+      final headers = <String, dynamic>{'Content-Type': 'application/json'};
+
+      if (_backendType == 'supabase' && _projectApiKey.isNotEmpty) {
+        headers['apikey'] = _projectApiKey;
+        headers['Authorization'] = 'Bearer $_projectApiKey';
+        headers['Prefer'] = 'return=representation';
+      } else if (_projectApiKey.isNotEmpty) {
+        headers['Authorization'] = 'Bearer $_projectApiKey';
+      }
+
+      final response = await dio.request(
+        url,
+        options: Options(method: method, headers: headers, receiveTimeout: const Duration(seconds: 15)),
+        data: body,
+      );
+
+      final data = response.data;
+      String responseText;
+
+      if (data is List) {
+        final count = data.length;
+        if (count == 0) {
+          responseText = '📭 Résultat: Aucune donnée trouvée.';
+        } else if (count <= 10) {
+          responseText = '✅ $method $path → ${response.statusCode}\n\n📦 $count résultat(s):\n${_formatJsonList(data)}';
+        } else {
+          responseText = '✅ $method $path → ${response.statusCode}\n\n📦 $count résultat(s) (affichage des 10 premiers):\n${_formatJsonList(data.sublist(0, 10))}';
+        }
+      } else if (data is Map) {
+        responseText = '✅ $method $path → ${response.statusCode}\n\n📦 Résultat:\n${_formatJsonMap(data)}';
+      } else {
+        responseText = '✅ $method $path → ${response.statusCode}\n\n$data';
+      }
+
+      _backend.sendMessage(widget.projectId, responseText, sender: 'bot').catchError((_) => <String, dynamic>{'error': true});
+      if (!mounted) return;
+      setState(() {
+        _isTyping = false;
+        _messages.add(_ChatMessage(sender: _members.first, text: responseText, timestamp: DateTime.now()));
+      });
+    } on DioException catch (e) {
+      String errorMsg = '❌ Erreur $method $path\n\n';
+      if (e.response != null) {
+        errorMsg += 'Status: ${e.response?.statusCode}\n';
+        final data = e.response?.data;
+        if (data is Map) {
+          errorMsg += '${data['message'] ?? data['error'] ?? data}';
+        } else {
+          errorMsg += '$data';
+        }
+      } else if (e.type == DioExceptionType.connectionTimeout || e.type == DioExceptionType.sendTimeout) {
+        errorMsg += '⏱️ Timeout - Le backend ne répond pas.';
+      } else if (e.type == DioExceptionType.connectionError) {
+        errorMsg += '🔌 Impossible de se connecter au backend.\nVérifiez l\'URL et la connexion internet.';
+      } else {
+        errorMsg += '${e.message}';
+      }
+      _backend.sendMessage(widget.projectId, errorMsg, sender: 'bot').catchError((_) => <String, dynamic>{'error': true});
+      if (!mounted) return;
+      setState(() {
+        _isTyping = false;
+        _messages.add(_ChatMessage(sender: _members.first, text: errorMsg, timestamp: DateTime.now()));
+      });
+    } catch (e) {
+      final errorMsg = '❌ Erreur inattendue: $e';
+      _backend.sendMessage(widget.projectId, errorMsg, sender: 'bot').catchError((_) => <String, dynamic>{'error': true});
+      if (!mounted) return;
+      setState(() {
+        _isTyping = false;
+        _messages.add(_ChatMessage(sender: _members.first, text: errorMsg, timestamp: DateTime.now()));
+      });
+    }
+    if (_scrollController.hasClients) {
+      _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+    }
+  }
+
+  String _formatJsonList(List data) {
+    final buf = StringBuffer();
+    for (var i = 0; i < data.length; i++) {
+      final item = data[i];
+      if (item is Map) {
+        final name = item['nom'] ?? item['name'] ?? item['title'] ?? item['id'] ?? '---';
+        final price = item['prix'] ?? item['price'] ?? '';
+        buf.writeln('• $name${price != '' ? ' ($price FCFA)' : ''}');
+        // Show extra fields
+        for (final key in item.keys) {
+          if (!['nom', 'name', 'title', 'id', 'prix', 'price', 'description_images', 'main_image', 'created_at'].contains(key)) {
+            final val = item[key];
+            if (val != null && val.toString().isNotEmpty && val.toString().length < 100) {
+              buf.writeln('  $key: $val');
+            }
+          }
+        }
+      } else {
+        buf.writeln('• $item');
+      }
+      if (i < data.length - 1) buf.writeln();
+    }
+    return buf.toString();
+  }
+
+  String _formatJsonMap(Map data) {
+    final buf = StringBuffer();
+    for (final entry in data.entries) {
+      final val = entry.value;
+      if (val is List) {
+        buf.writeln('${entry.key}: [${val.length} items]');
+      } else if (val is Map) {
+        buf.writeln('${entry.key}: {...}');
+      } else {
+        buf.writeln('${entry.key}: $val');
+      }
+    }
+    return buf.toString();
+  }
+
+  Future<String> _checkBackendStatus() async {
+    if (_backendUrl.isEmpty) return '⚠️ Aucun backend configuré.';
+    try {
+      final dio = Dio();
+      final headers = <String, dynamic>{};
+      if (_backendType == 'supabase' && _projectApiKey.isNotEmpty) {
+        headers['apikey'] = _projectApiKey;
+        headers['Authorization'] = 'Bearer $_projectApiKey';
+      }
+      final url = _backendType == 'supabase' ? '$_backendUrl/rest/v1/?limit=1' : _backendUrl;
+      final resp = await dio.get(url, options: Options(headers: headers, receiveTimeout: const Duration(seconds: 10)));
+      return '✅ Backend connecté!\n\nURL: $_backendUrl\nType: $_backendType\nStatus: ${resp.statusCode}\n\nLe backend est opérationnel.';
+    } on DioException catch (e) {
+      return '❌ Backend inaccessible\n\nURL: $_backendUrl\nErreur: ${e.message}\n\nVérifiez l\'URL et la connexion.';
+    }
+  }
+
+  Future<String> _listTables() async {
+    if (_backendUrl.isEmpty) return '⚠️ Aucun backend configuré.';
+    if (_backendType != 'supabase') return 'ℹ️ Listage des tables disponible uniquement pour Supabase.';
+    try {
+      final dio = Dio();
+      final headers = <String, dynamic>{
+        'apikey': _projectApiKey,
+        'Authorization': 'Bearer $_projectApiKey',
+      };
+      // Try common Supabase tables
+      final tables = ['produits', 'parametres_boutique', 'orders', 'users', 'profiles', 'categories'];
+      final found = <String>[];
+      for (final table in tables) {
+        try {
+          final resp = await dio.get('$_backendUrl/rest/v1/$table?select=id&limit=1',
+            options: Options(headers: headers, receiveTimeout: const Duration(seconds: 5)));
+          if (resp.statusCode == 200) {
+            found.add(table);
+          }
+        } catch (_) {}
+      }
+      if (found.isEmpty) return 'ℹ️ Aucune table accessible avec cette API key.\n\nVérifiez les permissions Supabase.';
+      return '📋 Tables disponibles:\n\n${found.map((t) => '• $t').join('\n')}\n\n💡 Essayez: GET /$found.first?select=*';
+    } catch (e) {
+      return '❌ Erreur: $e';
+    }
   }
 }
 
