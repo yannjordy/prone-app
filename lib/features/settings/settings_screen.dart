@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:go_router/go_router.dart';
 import 'dart:ui';
 import '../../app/app.dart';
 
@@ -456,7 +457,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   children: [
                     Expanded(child: GestureDetector(onTap: () => Navigator.pop(context), child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(12), border: Border.all(color: ThemeHelper.borderLight(context))), child: Center(child: Text('Annuler', style: TextStyle(color: ThemeHelper.textDim(context), fontSize: 14)))))),
                     const SizedBox(width: 12),
-                    Expanded(child: GestureDetector(onTap: () { Navigator.pop(context); Navigator.of(context).pushReplacementNamed('/login'); }, child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: AppColors.error, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Déconnexion', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))))),
+                    Expanded(child: GestureDetector(onTap: () { Navigator.pop(context); context.go('/login'); }, child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: AppColors.error, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Déconnexion', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))))),
                   ],
                 ),
                 SizedBox(height: MediaQuery.of(context).padding.bottom + 16),

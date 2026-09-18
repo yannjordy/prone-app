@@ -431,7 +431,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
                     Divider(color: borderColor.withOpacity(0.3), height: 1),
                     _buildPopupOption('edit.svg', 'Renommer', AppColors.primary, () { setState(() { _showContextMenu = false; _contextMenuProject = null; }); _renameProject(project); }),
                     _buildPopupOption(project.isPinned ? 'volume.svg' : 'mute.svg', project.isPinned ? 'Désépingler' : 'Épingler', AppColors.primary, () { setState(() { _showContextMenu = false; _contextMenuProject = null; }); _togglePin(project.id, project.isPinned); }),
-                    _buildPopupOption('archive.svg', project.isArchived ? 'Désarchiver' : 'Archiver', AppColors.warning, () { setState(() { _showContextMenu = false; _contextMenuProject = null; }); _archiveProject(project.id); }),
+                    _buildPopupOption('archive.svg', project.isArchived ? 'Désarchiver' : 'Archiver', AppColors.warning, () { setState(() { _showContextMenu = false; _contextMenuProject = null; }); _archiveProject(project.id, project.isArchived); }),
                     _buildPopupOption(project.isMuted ? 'volume.svg' : 'mute.svg', project.isMuted ? 'Démuter' : 'Muter', ThemeHelper.textDim(context), () { setState(() { _showContextMenu = false; _contextMenuProject = null; }); _toggleMute(project.id, project.isMuted); }),
                     Divider(color: borderColor.withOpacity(0.3), height: 1),
                     _buildPopupOption('trash.svg', 'Supprimer la conversation', AppColors.error, () { setState(() { _showContextMenu = false; _contextMenuProject = null; }); _clearMessages(project.id); }),
@@ -605,18 +605,21 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
   void _togglePin(String id, bool currentPin) async {
     await _backend.updateProject(id, {'is_pinned': currentPin ? 0 : 1});
     _loadProjects();
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(currentPin ? 'Projet désépinglé' : 'Projet épinglé'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
   }
 
-  void _archiveProject(String id) async {
-    await _backend.updateProject(id, {'is_archived': 1});
+  void _archiveProject(String id, bool isArchived) async {
+    await _backend.updateProject(id, {'is_archived': isArchived ? 0 : 1});
     _loadProjects();
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Projet archivé'), backgroundColor: AppColors.warning, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(isArchived ? 'Projet désarchivé' : 'Projet archivé'), backgroundColor: AppColors.warning, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
   }
 
   void _toggleMute(String id, bool currentMute) async {
     await _backend.updateProject(id, {'is_muted': currentMute ? 0 : 1});
     _loadProjects();
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(currentMute ? 'Notifications activées' : 'Notifications coupées'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
   }
 
@@ -689,17 +692,23 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Veuillez remplir tous les champs obligatoires'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
       return;
     }
-    final name = _newNameController.text;
-    await _backend.createProject(name, _newDescController.text, apiKey: _apiKeyController.text, backendUrl: _backendUrlController.text);
-    setState(() {
-      _showCreateForm = false;
-      _newNameController.clear();
-      _newDescController.clear();
-      _apiKeyController.clear();
-      _backendUrlController.clear();
-    });
-    _loadProjects();
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Projet "$name" créé'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+    try {
+      final name = _newNameController.text;
+      await _backend.createProject(name, _newDescController.text, apiKey: _apiKeyController.text, backendUrl: _backendUrlController.text);
+      setState(() {
+        _showCreateForm = false;
+        _newNameController.clear();
+        _newDescController.clear();
+        _apiKeyController.clear();
+        _backendUrlController.clear();
+      });
+      _loadProjects();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Projet "$name" créé'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur: $e'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+    }
   }
 }
 

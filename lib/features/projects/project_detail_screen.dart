@@ -51,10 +51,13 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     if (project.isNotEmpty) {
       final p = project.first;
       final name = (p['name'] as String?) ?? 'Projet';
+      final hash = name.hashCode;
+      final colors = [AppColors.primary, const Color(0xFF00CEC9), const Color(0xFF00B894), const Color(0xFF55EFC4), const Color(0xFF6C5CE7), const Color(0xFFE17055), const Color(0xFF0984E3)];
       setState(() {
         _projectName = name;
-        _projectInitials = name.split(' ').map((w) => w[0]).take(2).join().toUpperCase();
+        _projectInitials = name.split(' ').where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join().toUpperCase();
         _projectApiKey = (p['api_key'] as String?) ?? '';
+        _projectColor = colors[hash.abs() % colors.length];
       });
     }
     final msgs = await _backend.getMessages(widget.projectId);
@@ -864,7 +867,13 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       _isTyping = true;
     });
     _controller.clear();
-    _backend.sendMessage(widget.projectId, command, sender: 'user');
+    try {
+      await _backend.sendMessage(widget.projectId, command, sender: 'user');
+    } catch (e) {
+      if (!mounted) return;
+      setState(() { _isTyping = false; });
+      return;
+    }
     Future.delayed(const Duration(milliseconds: 1500), () async {
       if (!mounted) return;
       String response;
@@ -886,12 +895,15 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
           response = '💡 Commande reçue: "$command"\n\nTapez /help pour voir les commandes disponibles.';
         }
       }
-      _backend.sendMessage(widget.projectId, response, sender: 'bot');
+      _backend.sendMessage(widget.projectId, response, sender: 'bot').catchError((_) => <String, dynamic>{'error': true});
+      if (!mounted) return;
       setState(() {
         _isTyping = false;
         _messages.add(_ChatMessage(sender: _members.first, text: response, timestamp: DateTime.now()));
       });
-      _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+      }
     });
   }
 }
