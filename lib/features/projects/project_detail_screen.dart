@@ -102,9 +102,9 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       backgroundColor: ThemeHelper.bg(context),
       body: Stack(
         children: [
-          Column(
+           Column(
             children: [
-              SizedBox(height: MediaQuery.of(context).padding.top + 8),
+              const SizedBox(height: 8),
               // Header
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -199,7 +199,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
 
           if (_showSettings)
             Positioned(
-              top: MediaQuery.of(context).padding.top + 68,
+              top: 68,
               right: 16,
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(16),

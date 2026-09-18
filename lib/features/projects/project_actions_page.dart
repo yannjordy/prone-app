@@ -33,7 +33,7 @@ class _ProjectActionsPageState extends State<ProjectActionsPage> {
         children: [
           Column(
             children: [
-              SizedBox(height: MediaQuery.of(context).padding.top + 8),
+              const SizedBox(height: 8),
               _buildHeader(),
               const SizedBox(height: 16),
               Expanded(child: _buildActionsList()),

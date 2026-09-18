@@ -23,7 +23,7 @@ class ProjectExecutionsPage extends StatelessWidget {
       backgroundColor: ThemeHelper.bg(context),
       body: Column(
         children: [
-          SizedBox(height: MediaQuery.of(context).padding.top + 8),
+          const SizedBox(height: 8),
           _buildHeader(context),
           const SizedBox(height: 16),
           Expanded(

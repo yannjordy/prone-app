@@ -61,7 +61,7 @@ class _MobileLayout extends StatelessWidget {
 
     return Scaffold(
       backgroundColor: ThemeHelper.bg(context),
-      body: child,
+      body: SafeArea(child: child),
       extendBody: true,
       bottomNavigationBar: hideNav ? null : Container(
         padding: EdgeInsets.fromLTRB(20, 0, 20, bottom + 12),

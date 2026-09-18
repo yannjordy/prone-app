@@ -42,7 +42,7 @@ class _OrganizationScreenState extends State<OrganizationScreen> {
         children: [
           Column(
             children: [
-              SizedBox(height: MediaQuery.of(context).padding.top + 8),
+              const SizedBox(height: 8),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Container(

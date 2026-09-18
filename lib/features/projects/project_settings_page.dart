@@ -30,7 +30,7 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> {
       backgroundColor: bgColor,
       body: Column(
         children: [
-          SizedBox(height: MediaQuery.of(context).padding.top + 8),
+          const SizedBox(height: 8),
           _buildHeader(),
           const SizedBox(height: 16),
           Expanded(

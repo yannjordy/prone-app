@@ -211,7 +211,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
           GestureDetector(onTap: () => setState(() => _showMenu = false), child: Container(color: Colors.black.withOpacity(0.3))),
         if (_showMenu)
           Positioned(
-            top: MediaQuery.of(context).padding.top + 56, right: 24,
+            top: 56, right: 24,
             child: ClipRRect(
               borderRadius: BorderRadius.circular(16),
               child: BackdropFilter(
@@ -377,7 +377,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
     if (left + 200 > screenWidth) left = screenWidth - 210;
     if (left < 10) left = 10;
     if (top + 350 > screenHeight) top = screenHeight - 360;
-    if (top < MediaQuery.of(context).padding.top) top = MediaQuery.of(context).padding.top + 10;
+    if (top < 10) top = 10;
 
     setState(() {
       _contextMenuProject = project;
