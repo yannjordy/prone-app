@@ -31,7 +31,7 @@ dependencies:
   
   # Security
   flutter_secure_storage: ^9.0.0
-  image_picker: ^1.2.3
+  image_picker: ^1.1.2
   qr_flutter: ^4.1.0
   uuid: ^4.2.1
 
