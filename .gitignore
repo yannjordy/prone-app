@@ -1,0 +1,16 @@
+.dart_tool/
+.packages
+build/
+pubspec.lock
+*.iml
+.idea/
+ios/
+android/local.properties
+android/.gradle/
+android/app/build/
+android/build/
+android/gradle/
+android/gradlew
+android/gradlew.bat
+android/prone_app_android.iml
+android/settings.gradle.kts
