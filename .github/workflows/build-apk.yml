@@ -26,15 +26,13 @@ jobs:
       
       - name: Flutter pub get
         run: flutter pub get
-        working-directory: frontend
       
       - name: Build APK
         run: flutter build apk --release --no-tree-shake-icons
-        working-directory: frontend
       
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: prone-apk
-          path: frontend/build/app/outputs/flutter-apk/app-release.apk
+          path: build/app/outputs/flutter-apk/app-release.apk
           retention-days: 30
