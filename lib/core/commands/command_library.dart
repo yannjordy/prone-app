@@ -297,15 +297,17 @@ class CommandLibrary {
     if (params.isEmpty) return '❌ Usage: /schema <table>';
     final table = params[0];
     return '📐 Structure de la table "$table"\n'
-        '┌──────────────┬──────────────┬──────┐\n'
-        '│ Colonne      │ Type         │ Null │\n'
-        '├──────────────┼──────────────┼──────┤\n'
-        '│ id           │ uuid         │ NON  │\n'
-        '│ name         │ varchar(255) │ NON  │\n'
-        '│ email        │ varchar(255) │ OUI  │\n'
-        '│ created_at   │ timestamp    │ NON  │\n'
-        '│ updated_at   │ timestamp    │ NON  │\n'
-        '└──────────────┴──────────────┴──────┘';
+        '\`\`\`\n'
+        '╔══════════════╦══════════════╦══════╗\n'
+        '║   Colonne    ║     Type     ║ Null ║\n'
+        '╠══════════════╬══════════════╬══════╣\n'
+        '║ id           ║ uuid         ║ NON  ║\n'
+        '║ name         ║ varchar(255) ║ NON  ║\n'
+        '║ email        ║ varchar(255) ║ OUI  ║\n'
+        '║ created_at   ║ timestamp    ║ NON  ║\n'
+        '║ updated_at   ║ timestamp    ║ NON  ║\n'
+        '╚══════════════╩══════════════╩══════╝\n'
+        '\`\`\`';
   }
 
   static String _last(List<String> params) {
@@ -313,15 +315,17 @@ class CommandLibrary {
     final table = params[0];
     final limit = params.length > 1 ? params[1] : '5';
     return '📜 Dernières $limit entrées de "$table"\n'
-        '┌──────┬─────────────────┬────────────┐\n'
-        '│ id   │ name            │ date       │\n'
-        '├──────┼─────────────────┼────────────┤\n'
-        '│ 45   │ New Product     │ 2024-01-15 │\n'
-        '│ 44   │ Another Item    │ 2024-01-15 │\n'
-        '│ 43   │ Test Product    │ 2024-01-15 │\n'
-        '│ 42   │ Featured Item   │ 2024-01-15 │\n'
-        '│ 41   │ Last Product    │ 2024-01-15 │\n'
-        '└──────┴─────────────────┴────────────┘';
+        '\`\`\`\n'
+        '╔══════╦═════════════════╦════════════╗\n'
+        '║  id  ║      name       ║    date    ║\n'
+        '╠══════╬═════════════════╬════════════╣\n'
+        '║  45  ║ New Product     ║ 2024-01-15 ║\n'
+        '║  44  ║ Another Item    ║ 2024-01-15 ║\n'
+        '║  43  ║ Test Product    ║ 2024-01-15 ║\n'
+        '║  42  ║ Featured Item   ║ 2024-01-15 ║\n'
+        '║  41  ║ Last Product    ║ 2024-01-15 ║\n'
+        '╚══════╩═════════════════╩════════════╝\n'
+        '\`\`\`';
   }
 
   static String _search(List<String> params) {
@@ -329,42 +333,48 @@ class CommandLibrary {
     final field = params[1];
     final val = params[2];
     return '🔎 Résultats de recherche\n'
-        '┌──────┬────────────────┬──────────┐\n'
-        '│ id   │ $field${' ' * (14 - field.length)}│ type     │\n'
-        '├──────┼────────────────┼──────────┤\n'
-        '│ 12   │ $val${' ' * (14 - val.length)}│ exact    │\n'
-        '│ 23   │ ${val}X${' ' * (13 - val.length)}│ partiel  │\n'
-        '└──────┴────────────────┴──────────┘';
+        '\`\`\`\n'
+        '╔══════╦════════════════╦══════════╗\n'
+        '║  id  ║ ${field.padRight(14)}║   type   ║\n'
+        '╠══════╬════════════════╬══════════╣\n'
+        '║  12  ║ ${val.padRight(14)}║  exact   ║\n'
+        '║  23  ║ ${(val + "X").padRight(14)}║ partiel  ║\n'
+        '╚══════╩════════════════╩══════════╝\n'
+        '\`\`\`';
   }
 
   static String _endpoints() {
     return '🌐 Endpoints API\n'
-        '┌────────┬──────────────────────┐\n'
-        '│ Méthode│ Endpoint             │\n'
-        '├────────┼──────────────────────┤\n'
-        '│ GET    │ /api/users           │\n'
-        '│ GET    │ /api/users/:id       │\n'
-        '│ POST   │ /api/users           │\n'
-        '│ PUT    │ /api/users/:id       │\n'
-        '│ DELETE │ /api/users/:id       │\n'
-        '│ GET    │ /api/orders          │\n'
-        '│ POST   │ /api/orders          │\n'
-        '│ GET    │ /api/products        │\n'
-        '│ POST   │ /api/webhooks/:id    │\n'
-        '└────────┴──────────────────────┘';
+        '\`\`\`\n'
+        '╔══════════╦══════════════════════════╗\n'
+        '║ Méthode  ║       Endpoint           ║\n'
+        '╠══════════╬══════════════════════════╣\n'
+        '║   GET    ║ /api/users               ║\n'
+        '║   GET    ║ /api/users/:id           ║\n'
+        '║   POST   ║ /api/users               ║\n'
+        '║   PUT    ║ /api/users/:id           ║\n'
+        '║  DELETE  ║ /api/users/:id           ║\n'
+        '║   GET    ║ /api/orders              ║\n'
+        '║   POST   ║ /api/orders              ║\n'
+        '║   GET    ║ /api/products            ║\n'
+        '║   POST   ║ /api/webhooks/:id        ║\n'
+        '╚══════════╩══════════════════════════╝\n'
+        '\`\`\`';
   }
 
   static String _requests() {
     return '📨 Dernières requêtes\n'
-        '┌────────┬──────┬──────────────────┬──────┐\n'
-        '│ Heure  │ Méthode│ Endpoint       │ Code │\n'
-        '├────────┼──────┼──────────────────┼──────┤\n'
-        '│ 14:32  │ GET  │ /api/users       │ 200  │\n'
-        '│ 14:31  │ POST │ /api/orders      │ 201  │\n'
-        '│ 14:30  │ GET  │ /api/products    │ 200  │\n'
-        '│ 14:28  │ POST │ /api/auth/login  │ 200  │\n'
-        '│ 14:25  │ GET  │ /api/users/123   │ 200  │\n'
-        '└────────┴──────┴──────────────────┴──────┘';
+        '\`\`\`\n'
+        '╔══════════╦════════╦══════════════════╦══════╗\n'
+        '║  Heure   ║ Méthode║     Endpoint     ║ Code ║\n'
+        '╠══════════╬════════╬══════════════════╬══════╣\n'
+        '║  14:32   ║  GET   ║ /api/users       ║ 200  ║\n'
+        '║  14:31   ║  POST  ║ /api/orders      ║ 201  ║\n'
+        '║  14:30   ║  GET   ║ /api/products    ║ 200  ║\n'
+        '║  14:28   ║  POST  ║ /api/auth/login  ║ 200  ║\n'
+        '║  14:25   ║  GET   ║ /api/users/123   ║ 200  ║\n'
+        '╚══════════╩════════╩══════════════════╩══════╝\n'
+        '\`\`\`';
   }
 
   static String _errors() {

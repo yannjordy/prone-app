@@ -1101,6 +1101,12 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     final isCurrentUser = msg.sender == _currentUser;
     final msgIndex = _messages.indexOf(msg);
 
+    // Find if this message is a reply to another
+    _ChatMessage? repliedMsg;
+    if (msg.replyToIndex != null && msg.replyToIndex! >= 0 && msg.replyToIndex! < _messages.length) {
+      repliedMsg = _messages[msg.replyToIndex!];
+    }
+
     return Dismissible(
       key: ValueKey('msg_$msgIndex'),
       direction: _userRole == 'viewer' ? DismissDirection.none : DismissDirection.startToEnd,
@@ -1149,6 +1155,32 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                   child: Column(
                     crossAxisAlignment: isCurrentUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
                     children: [
+                      // Reply bubble
+                      if (repliedMsg != null)
+                        GestureDetector(
+                          onTap: () {
+                            // Scroll to the original message
+                            if (_scrollController.hasClients) {
+                              final targetOffset = msg.replyToIndex! * 100.0;
+                              _scrollController.animateTo(targetOffset.clamp(0.0, _scrollController.position.maxScrollExtent), duration: const Duration(milliseconds: 500), curve: Curves.easeInOut);
+                            }
+                          },
+                          child: Container(
+                            margin: const EdgeInsets.only(bottom: 4),
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: AppColors.success.withOpacity(0.08),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border(left: BorderSide(color: AppColors.success, width: 3)),
+                            ),
+                            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              Text(repliedMsg.sender.name, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.success)),
+                              const SizedBox(height: 2),
+                              Text(repliedMsg.text, style: TextStyle(fontSize: 11, color: ThemeHelper.textDim(context)), maxLines: 2, overflow: TextOverflow.ellipsis),
+                            ]),
+                          ),
+                        ),
+                      // Message bubble
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                         decoration: BoxDecoration(
@@ -1232,8 +1264,9 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                 const SizedBox(width: 12),
                 Expanded(child: GestureDetector(onTap: () {
                   if (commentController.text.trim().isNotEmpty) {
+                    final replyIdx = _messages.indexOf(msg);
                     Navigator.pop(ctx);
-                    _sendCommand(commentController.text.trim());
+                    _sendComment(commentController.text.trim(), replyIdx);
                   }
                 }, child: Container(
                   padding: const EdgeInsets.symmetric(vertical: 12),
@@ -1246,6 +1279,20 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         ]);
       },
     );
+  }
+
+  void _sendComment(String text, int replyToIndex) async {
+    if (text.trim().isEmpty) return;
+    setState(() {
+      _messages.add(_ChatMessage(sender: _currentUser!, text: text, timestamp: DateTime.now(), replyToIndex: replyToIndex));
+    });
+    _controller.clear();
+    try {
+      await _backend.sendMessage(widget.projectId, text, sender: 'user');
+    } catch (_) {}
+    if (_scrollController.hasClients) {
+      _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+    }
   }
 
   void _showMessageOptions(_ChatMessage msg, Offset position) {
@@ -1578,7 +1625,8 @@ class _ChatMessage {
   final _Member sender;
   final String text;
   final DateTime timestamp;
-  _ChatMessage({required this.sender, required this.text, required this.timestamp});
+  final int? replyToIndex;
+  _ChatMessage({required this.sender, required this.text, required this.timestamp, this.replyToIndex});
 }
 
 class _SettingsItem extends StatelessWidget {
