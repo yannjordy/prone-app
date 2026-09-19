@@ -567,37 +567,41 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                   ),
                 ),
                 const SizedBox(height: 16),
-                const SizedBox(height: 8),
-                // Members list
-                Flexible(
-                  child: ListView.builder(
-                    shrinkWrap: true,
-                    itemCount: _members.length,
-                    itemBuilder: (context, index) {
-                      final m = _members[index];
-                      return Material(
-                        color: Colors.transparent,
-                        child: InkWell(
-                          onTap: () { Navigator.pop(context); _showMemberProfileModal(m); },
-                          borderRadius: BorderRadius.circular(12),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
-                            child: Row(children: [
-                              _buildAvatar(m, size: 40),
-                              const SizedBox(width: 12),
-                              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                Text(m.name, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: ThemeHelper.text(context))),
-                                Text(m.isBot ? 'Bot' : (m.role ?? 'Membre'), style: TextStyle(fontSize: 12, color: m.isOnline ? AppColors.success : ThemeHelper.textDim(context))),
-                              ])),
-                              if (m.isOnline)
-                                Container(width: 8, height: 8, decoration: BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
+                // Invite buttons
+                if (_userRole == 'admin' || _userRole == 'editor')
+                  Row(
+                    children: [
+                      Expanded(
+                        child: GestureDetector(
+                          onTap: () { Navigator.pop(context); _inviteMember(); },
+                          child: Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.1), borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.primary.withOpacity(0.3))),
+                            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                              Icon(Icons.person_add, color: AppColors.primary, size: 18),
+                              const SizedBox(width: 8),
+                              Text('Email', style: TextStyle(fontSize: 13, color: AppColors.primary, fontWeight: FontWeight.w600)),
                             ]),
                           ),
                         ),
-                      );
-                    },
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: GestureDetector(
+                          onTap: () { Navigator.pop(context); _showQRCode(); },
+                          child: Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(color: AppColors.success.withOpacity(0.1), borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.success.withOpacity(0.3))),
+                            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                              Icon(Icons.qr_code, color: AppColors.success, size: 18),
+                              const SizedBox(width: 8),
+                              Text('QR Code', style: TextStyle(fontSize: 13, color: AppColors.success, fontWeight: FontWeight.w600)),
+                            ]),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
-                ),
                 const SizedBox(height: 16),
                 GestureDetector(
                   onTap: () => Navigator.pop(context),
@@ -1229,7 +1233,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                 Expanded(child: GestureDetector(onTap: () {
                   if (commentController.text.trim().isNotEmpty) {
                     Navigator.pop(ctx);
-                    _sendCommand('/comment ${msg.text.substring(0, msg.text.length.clamp(0, 20))} → ${commentController.text}');
+                    _sendCommand(commentController.text.trim());
                   }
                 }, child: Container(
                   padding: const EdgeInsets.symmetric(vertical: 12),
