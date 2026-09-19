@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -24,6 +25,8 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   bool _showCommands = false;
   bool _showSettings = false;
   bool _isTyping = false;
+  bool _isAdmin = true;
+  int? _selectedMessageIndex;
   String _selectedCategory = 'All';
   final _backend = LocalBackend();
 
@@ -783,60 +786,166 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   Widget _buildMessage(_ChatMessage msg) {
     final isBot = msg.sender.isBot;
     final isCurrentUser = msg.sender == _currentUser;
+    final msgIndex = _messages.indexOf(msg);
 
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Row(
-        mainAxisAlignment: isCurrentUser ? MainAxisAlignment.end : MainAxisAlignment.start,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (!isCurrentUser) ...[
-            Container(
-              width: 36, height: 36,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(colors: [msg.sender.color, msg.sender.color.withOpacity(0.7)]),
-                borderRadius: BorderRadius.circular(50),
-                border: Border.all(color: ThemeHelper.bg(context), width: 2),
-              ),
-              child: Center(child: Text(msg.sender.initials, style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w700))),
-            ),
-            const SizedBox(width: 10),
-          ],
-          Flexible(
-            child: Column(
-              crossAxisAlignment: isCurrentUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-              children: [
-                if (!isCurrentUser)
-                  Padding(padding: const EdgeInsets.only(bottom: 4), child: Text(msg.sender.name, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: msg.sender.color))),
+    return GestureDetector(
+      onLongPressStart: (details) {
+        setState(() => _selectedMessageIndex = msgIndex);
+        _showMessageOptions(msg, details.globalPosition);
+      },
+      child: AnimatedScale(
+        scale: _selectedMessageIndex == msgIndex ? 1.05 : 1.0,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: 16),
+          child: Row(
+            mainAxisAlignment: isCurrentUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (!isCurrentUser) ...[
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  width: 36, height: 36,
                   decoration: BoxDecoration(
-                    color: isCurrentUser ? AppColors.primary.withOpacity(0.15) : ThemeHelper.surface(context),
-                    borderRadius: BorderRadius.only(topLeft: const Radius.circular(16), topRight: const Radius.circular(16), bottomLeft: Radius.circular(isCurrentUser ? 16 : 4), bottomRight: Radius.circular(isCurrentUser ? 4 : 16)),
-                    border: Border.all(color: isCurrentUser ? AppColors.primary.withOpacity(0.3) : ThemeHelper.borderLight(context)),
+                    gradient: LinearGradient(colors: [msg.sender.color, msg.sender.color.withOpacity(0.7)]),
+                    borderRadius: BorderRadius.circular(50),
+                    border: Border.all(color: ThemeHelper.bg(context), width: 2),
                   ),
-                  child: Text(msg.text, style: TextStyle(fontSize: 14, color: ThemeHelper.text(context), height: 1.5, fontFamily: isBot ? 'monospace' : null)),
+                  child: Center(child: Text(msg.sender.initials, style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w700))),
                 ),
-                const SizedBox(height: 4),
-                Text('${msg.timestamp.hour}:${msg.timestamp.minute.toString().padLeft(2, '0')}', style: TextStyle(fontSize: 11, color: ThemeHelper.textDim(context))),
+                const SizedBox(width: 10),
               ],
-            ),
-          ),
-          if (isCurrentUser) ...[
-            const SizedBox(width: 10),
-            Container(
-              width: 36, height: 36,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(colors: [msg.sender.color, msg.sender.color.withOpacity(0.7)]),
-                borderRadius: BorderRadius.circular(50),
-                border: Border.all(color: ThemeHelper.bg(context), width: 2),
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: isCurrentUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                  children: [
+                    if (!isCurrentUser)
+                      Padding(padding: const EdgeInsets.only(bottom: 4), child: Text(msg.sender.name, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: msg.sender.color))),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: _selectedMessageIndex == msgIndex
+                            ? AppColors.primary.withOpacity(0.08)
+                            : isCurrentUser ? AppColors.primary.withOpacity(0.15) : ThemeHelper.surface(context),
+                        borderRadius: BorderRadius.only(topLeft: const Radius.circular(16), topRight: const Radius.circular(16), bottomLeft: Radius.circular(isCurrentUser ? 16 : 4), bottomRight: Radius.circular(isCurrentUser ? 4 : 16)),
+                        border: Border.all(color: _selectedMessageIndex == msgIndex
+                            ? AppColors.primary.withOpacity(0.5)
+                            : isCurrentUser ? AppColors.primary.withOpacity(0.3) : ThemeHelper.borderLight(context)),
+                      ),
+                      child: Text(msg.text, style: TextStyle(fontSize: 14, color: ThemeHelper.text(context), height: 1.5, fontFamily: isBot ? 'monospace' : null)),
+                    ),
+                    const SizedBox(height: 4),
+                    Text('${msg.timestamp.hour}:${msg.timestamp.minute.toString().padLeft(2, '0')}', style: TextStyle(fontSize: 11, color: ThemeHelper.textDim(context))),
+                  ],
+                ),
               ),
-              child: Center(child: Text(msg.sender.initials, style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w700))),
-            ),
-          ],
-        ],
+              if (isCurrentUser) ...[
+                const SizedBox(width: 10),
+                Container(
+                  width: 36, height: 36,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(colors: [msg.sender.color, msg.sender.color.withOpacity(0.7)]),
+                    borderRadius: BorderRadius.circular(50),
+                    border: Border.all(color: ThemeHelper.bg(context), width: 2),
+                  ),
+                  child: Center(child: Text(msg.sender.initials, style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w700))),
+                ),
+              ],
+            ],
+          ),
+        ),
       ),
     );
+  }
+
+  void _showMessageOptions(_ChatMessage msg, Offset position) {
+    final surfaceColor = ThemeHelper.surface(context);
+    final borderColor = ThemeHelper.borderLight(context);
+    final textColor = ThemeHelper.text(context);
+    final textDimColor = ThemeHelper.textDim(context);
+
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'dismiss',
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 250),
+      transitionBuilder: (ctx, a1, a2, child) {
+        return FadeTransition(
+          opacity: a1,
+          child: ScaleTransition(
+            scale: CurvedAnimation(parent: a1, curve: Curves.easeOutBack),
+            child: child,
+          ),
+        );
+      },
+      pageBuilder: (ctx, a1, a2) {
+        return Stack(
+          children: [
+            GestureDetector(
+              onTap: () { Navigator.pop(ctx); setState(() => _selectedMessageIndex = null); },
+              child: ClipRect(
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+                  child: Container(color: Colors.black.withOpacity(0.4)),
+                ),
+              ),
+            ),
+            Positioned(
+              top: position.dy - 56,
+              left: position.dx - 60,
+              child: Material(
+                color: Colors.transparent,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: surfaceColor.withOpacity(0.95),
+                    borderRadius: BorderRadius.circular(10),
+                    boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 10, offset: const Offset(0, 4))],
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      GestureDetector(
+                        onTap: () {
+                          Clipboard.setData(ClipboardData(text: msg.text));
+                          Navigator.pop(ctx);
+                          setState(() => _selectedMessageIndex = null);
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Message copie'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                        },
+                        child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          SvgPicture.asset('assets/icons/copy.svg', width: 16, height: 16, colorFilter: ColorFilter.mode(AppColors.primary, BlendMode.srcIn)),
+                          const SizedBox(width: 4),
+                          Text('Copier', style: TextStyle(fontSize: 12, color: AppColors.primary, fontWeight: FontWeight.w500)),
+                        ]),
+                      ),
+                      if (_isAdmin) ...[
+                        const SizedBox(width: 14),
+                        GestureDetector(
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            setState(() {
+                              _messages.removeAt(_selectedMessageIndex ?? 0);
+                              _selectedMessageIndex = null;
+                            });
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Message supprime'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                          },
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            SvgPicture.asset('assets/icons/trash.svg', width: 16, height: 16, colorFilter: ColorFilter.mode(AppColors.error, BlendMode.srcIn)),
+                            const SizedBox(width: 4),
+                            Text('Supprimer', style: TextStyle(fontSize: 12, color: AppColors.error, fontWeight: FontWeight.w500)),
+                          ]),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    ).then((_) => setState(() => _selectedMessageIndex = null));
   }
 
   Widget _buildTypingIndicator() {

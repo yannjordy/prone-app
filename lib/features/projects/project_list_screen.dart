@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:http/http.dart' as http;
+import 'dart:typed_data';
+import 'package:image_picker/image_picker.dart';
 import 'dart:ui';
 import '../../app/app.dart';
 import '../../core/local/local_backend.dart';
-import '../../core/local/database_helper.dart';
 
 class ProjectListScreen extends StatefulWidget {
   const ProjectListScreen({super.key});
@@ -14,7 +16,7 @@ class ProjectListScreen extends StatefulWidget {
   State<ProjectListScreen> createState() => _ProjectListScreenState();
 }
 
-class _ProjectListScreenState extends State<ProjectListScreen> {
+class _ProjectListScreenState extends State<ProjectListScreen> with TickerProviderStateMixin {
   bool _showMenu = false;
   bool _showCreateForm = false;
   bool _showSearch = false;
@@ -33,14 +35,33 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
   final _notifService = NotificationService();
   final _backend = LocalBackend();
   List<_Project> _projects = [];
+  int _createFormStep = 0;
+  bool _backendVerified = false;
+  bool _isVerifying = false;
+  Uint8List? _projectImageBytes;
+  final _imagePicker = ImagePicker();
+  late final AnimationController _verifyingAnimController;
 
   @override
   void initState() {
     super.initState();
+    _verifyingAnimController = AnimationController(vsync: this, duration: const Duration(milliseconds: 500))..repeat(reverse: true);
     _loadViewPreference();
     _loadBackendStatus();
     _loadProjects();
     _notifService.addListener(() => setState(() {}));
+  }
+
+  @override
+  void dispose() {
+    _verifyingAnimController.dispose();
+    _searchController.dispose();
+    _newNameController.dispose();
+    _newDescController.dispose();
+    _apiKeyController.dispose();
+    _backendUrlController.dispose();
+    _renameController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadProjects() async {
@@ -208,7 +229,15 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
           ),
         ),
         if (_showMenu)
-          GestureDetector(onTap: () => setState(() => _showMenu = false), child: Container(color: Colors.black.withOpacity(0.3))),
+          GestureDetector(
+            onTap: () => setState(() => _showMenu = false),
+            child: ClipRect(
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+                child: Container(color: Colors.black.withOpacity(0.3)),
+              ),
+            ),
+          ),
         if (_showMenu)
           Positioned(
             top: 56, right: 24,
@@ -223,12 +252,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       _MenuItem(icon: 'plus.svg', label: 'Nouveau projet', onTap: () {
-                        setState(() => _showMenu = false);
-                        if (!_hasBackend) {
-                          _showNoBackendWarning();
-                        } else {
-                          setState(() => _showCreateForm = true);
-                        }
+                        setState(() { _showMenu = false; _showCreateForm = true; });
                       }),
                       _MenuItem(icon: 'search.svg', label: 'Rechercher', onTap: () { setState(() { _showMenu = false; _showSearch = true; }); }),
                       Divider(color: ThemeHelper.borderLight(context), height: 1),
@@ -240,13 +264,26 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
             ),
           ),
         if (_showCreateForm)
-          GestureDetector(onTap: () => setState(() => _showCreateForm = false), child: Container(color: Colors.black.withOpacity(0.5))),
+          GestureDetector(
+            onTap: () => setState(() => _showCreateForm = false),
+            child: ClipRect(
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+                child: Container(color: Colors.black.withOpacity(0.5)),
+              ),
+            ),
+          ),
         if (_showCreateForm) _buildCreateForm(),
         // Context menu overlay
         if (_showContextMenu)
           GestureDetector(
             onTap: () => setState(() { _showContextMenu = false; _contextMenuProject = null; }),
-            child: Container(color: Colors.black.withOpacity(0.2)),
+            child: ClipRect(
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+                child: Container(color: Colors.black.withOpacity(0.2)),
+              ),
+            ),
           ),
         if (_showContextMenu) _buildContextMenu(),
       ],
@@ -259,6 +296,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
+      useRootNavigator: true,
       builder: (context) => ClipRRect(
         borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
         child: BackdropFilter(
@@ -520,6 +558,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
+      useRootNavigator: true,
       builder: (context) => ClipRRect(
         borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
         child: BackdropFilter(
@@ -544,8 +583,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
                     const SizedBox(width: 12),
                     Expanded(child: GestureDetector(onTap: () async {
                       Navigator.pop(context);
-                      final db = await DatabaseHelper().database;
-                      await db.delete('messages', where: 'project_id = ?', whereArgs: [projectId]);
+                      await LocalBackend().deleteProject(projectId);
                       _loadProjects();
                       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Conversation supprimée'), backgroundColor: AppColors.warning, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
                     }, child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: AppColors.warning, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Supprimer', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))))),
@@ -564,6 +602,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
+      useRootNavigator: true,
       builder: (context) => ClipRRect(
         borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
         child: BackdropFilter(
@@ -638,33 +677,116 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
             width: MediaQuery.of(context).size.width * 0.9,
             padding: const EdgeInsets.all(24),
             decoration: BoxDecoration(color: surfaceColor.withOpacity(0.95), borderRadius: BorderRadius.circular(24), border: Border.all(color: borderColor)),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text('Nouveau Projet', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
-                const SizedBox(height: 8),
-                Text('Connectez votre backend API', style: TextStyle(fontSize: 13, color: textDimColor)),
-                const SizedBox(height: 24),
-                _buildInput('Nom du projet', _newNameController, 'Mon Backend API'),
-                const SizedBox(height: 12),
-                _buildInput('Description', _newDescController, 'Description optionnelle'),
-                const SizedBox(height: 12),
-                _buildInput('Clé API', _apiKeyController, 'sk-xxxxxxxxxxxxxxxx', isPassword: true),
-                const SizedBox(height: 12),
-                _buildInput('URL du Backend', _backendUrlController, 'https://api.monbackend.com'),
-                const SizedBox(height: 20),
-                Row(
-                  children: [
-                    Expanded(child: GestureDetector(onTap: () => setState(() => _showCreateForm = false), child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: surfaceColor, borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)), child: Center(child: Text('Annuler', style: TextStyle(color: textDimColor, fontSize: 14)))))),
-                    const SizedBox(width: 12),
-                    Expanded(child: GestureDetector(onTap: _createProject, child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Créer', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))))),
-                  ],
-                ),
-              ],
-            ),
+            child: _createFormStep == 0
+                ? _buildStepFields(surfaceColor, borderColor, textColor, textDimColor)
+                : _createFormStep == 1
+                    ? _buildStepVerifying(textColor, textDimColor)
+                    : _buildStepPhoto(textColor, textDimColor),
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildStepFields(Color surfaceColor, Color borderColor, Color textColor, Color textDimColor) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text('Nouveau Projet', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
+        const SizedBox(height: 8),
+        Text('Connectez votre backend API', style: TextStyle(fontSize: 13, color: textDimColor)),
+        const SizedBox(height: 24),
+        _buildInput('Nom du projet', _newNameController, 'Mon Backend API'),
+        const SizedBox(height: 12),
+        _buildInput('Description', _newDescController, 'Description optionnelle'),
+        const SizedBox(height: 12),
+        _buildInput('Cle API', _apiKeyController, 'sk-xxxxxxxxxxxxxxxx', isPassword: true),
+        const SizedBox(height: 12),
+        _buildInput('URL du Backend', _backendUrlController, 'https://api.monbackend.com'),
+        const SizedBox(height: 20),
+        Row(
+          children: [
+            Expanded(child: GestureDetector(onTap: () => setState(() { _showCreateForm = false; _createFormStep = 0; _projectImageBytes = null; }), child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: surfaceColor, borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)), child: Center(child: Text('Annuler', style: TextStyle(color: textDimColor, fontSize: 14)))))),
+            const SizedBox(width: 12),
+            Expanded(child: GestureDetector(onTap: _verifyBackend, child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Verifier', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))))),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStepVerifying(Color textColor, Color textDimColor) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const SizedBox(height: 16),
+        AnimatedBuilder(
+          animation: _verifyingAnimController,
+          builder: (context, _) {
+            return Container(
+              width: 80, height: 80,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: AppColors.primary.withOpacity(0.2 + _verifyingAnimController.value * 0.6), width: 3),
+              ),
+              child: Center(
+                child: SizedBox(
+                  width: 40, height: 40,
+                  child: CircularProgressIndicator(strokeWidth: 3, valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary)),
+                ),
+              ),
+            );
+          },
+        ),
+        const SizedBox(height: 24),
+        Text('Verification en cours...', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: textColor)),
+        const SizedBox(height: 8),
+        Text('Test de connexion au backend', style: TextStyle(fontSize: 13, color: textDimColor)),
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  Widget _buildStepPhoto(Color textColor, Color textDimColor) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(width: 48, height: 48, decoration: BoxDecoration(color: AppColors.success.withOpacity(0.1), shape: BoxShape.circle), child: const Icon(Icons.check_circle_outline, color: AppColors.success, size: 28)),
+        const SizedBox(height: 12),
+        Text('Backend connecte !', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.success)),
+        const SizedBox(height: 8),
+        Text('Ajoutez une photo de profil', style: TextStyle(fontSize: 13, color: textDimColor)),
+        const SizedBox(height: 24),
+        GestureDetector(
+          onTap: _pickProjectImage,
+          child: Container(
+            width: 100, height: 100,
+            decoration: BoxDecoration(
+              color: ThemeHelper.bg(context),
+              shape: BoxShape.circle,
+              border: Border.all(color: AppColors.success, width: 2),
+            ),
+            child: _projectImageBytes != null
+                ? ClipOval(child: Image.memory(_projectImageBytes!, width: 100, height: 100, fit: BoxFit.cover))
+                : Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.camera_alt_outlined, color: textDimColor, size: 28),
+                      const SizedBox(height: 4),
+                      Text('Photo', style: TextStyle(fontSize: 10, color: textDimColor)),
+                    ],
+                  ),
+          ),
+        ),
+        const SizedBox(height: 24),
+        Row(
+          children: [
+            Expanded(child: GestureDetector(onTap: () => setState(() { _createFormStep = 0; _backendVerified = false; _projectImageBytes = null; }), child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(12), border: Border.all(color: ThemeHelper.borderLight(context))), child: Center(child: Text('Retour', style: TextStyle(color: textDimColor, fontSize: 14)))))),
+            const SizedBox(width: 12),
+            Expanded(child: GestureDetector(onTap: _createProject, child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Creer', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))))),
+          ],
+        ),
+      ],
     );
   }
 
@@ -687,9 +809,60 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
     );
   }
 
-  void _createProject() async {
+  Future<void> _verifyBackend() async {
     if (_newNameController.text.isEmpty || _apiKeyController.text.isEmpty || _backendUrlController.text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Veuillez remplir tous les champs obligatoires'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+      return;
+    }
+    setState(() { _createFormStep = 1; _isVerifying = true; });
+
+    try {
+      final url = _backendUrlController.text.trim();
+      final key = _apiKeyController.text.trim();
+      bool connected = false;
+
+      if (url.contains('supabase')) {
+        final restUrl = url.replaceAll(RegExp(r'/rest/v1.*'), '');
+        final response = await http.get(
+          Uri.parse('$restUrl/rest/v1/?apikey=$key'),
+          headers: {'apikey': key, 'Authorization': 'Bearer $key'},
+        ).timeout(const Duration(seconds: 8));
+        connected = response.statusCode == 200 || response.statusCode == 404;
+      } else {
+        final response = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 8));
+        connected = response.statusCode >= 200 && response.statusCode < 500;
+      }
+
+      if (!mounted) return;
+      if (connected) {
+        setState(() { _createFormStep = 2; _backendVerified = true; _isVerifying = false; });
+      } else {
+        setState(() { _createFormStep = 0; _isVerifying = false; });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Backend non accessible'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() { _createFormStep = 0; _isVerifying = false; });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur de connexion: $e'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+    }
+  }
+
+  Future<void> _pickProjectImage() async {
+    try {
+      final picked = await _imagePicker.pickImage(source: ImageSource.gallery, maxWidth: 256, maxHeight: 256, imageQuality: 80);
+      if (picked != null) {
+        final bytes = await picked.readAsBytes();
+        setState(() => _projectImageBytes = bytes);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur image: $e'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+    }
+  }
+
+  void _createProject() async {
+    if (_newNameController.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Le nom du projet est requis'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
       return;
     }
     try {
@@ -697,6 +870,9 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
       await _backend.createProject(name, _newDescController.text, apiKey: _apiKeyController.text, backendUrl: _backendUrlController.text);
       setState(() {
         _showCreateForm = false;
+        _createFormStep = 0;
+        _backendVerified = false;
+        _projectImageBytes = null;
         _newNameController.clear();
         _newDescController.clear();
         _apiKeyController.clear();
@@ -704,7 +880,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> {
       });
       _loadProjects();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Projet "$name" créé'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Projet "$name" cree'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur: $e'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
