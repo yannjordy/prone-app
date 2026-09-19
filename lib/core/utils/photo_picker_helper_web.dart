@@ -1,9 +1,7 @@
 import 'dart:typed_data';
 import 'dart:html' as html;
-import 'photo_picker_helper.dart';
 
-class PhotoPickerHelperImpl implements PhotoPickerHelper {
-  @override
+class PhotoPickerHelperImpl {
   Future<List<int>?> pickImage() async {
     final input = html.FileUploadInputElement()..accept = 'image/*';
     input.click();

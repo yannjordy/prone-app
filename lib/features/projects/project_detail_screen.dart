@@ -4,6 +4,9 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:dio/dio.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:typed_data';
+import 'dart:convert';
 import 'dart:ui';
 import '../../app/app.dart';
 import '../../core/commands/command_library.dart';
@@ -37,6 +40,8 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   String _projectApiKey = '';
   String _backendUrl = '';
   String _backendType = 'generic';
+  Uint8List? _projectImageBytes;
+  String _userRole = 'admin';
 
   final List<_Member> _members = [
     _Member(name: 'Bot', initials: 'BOT', color: Color(0xFF55EFC4), isOnline: true, isBot: true),
@@ -59,6 +64,13 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       final name = (p['name'] as String?) ?? 'Projet';
       final hash = name.hashCode;
       final colors = [AppColors.primary, const Color(0xFF00CEC9), const Color(0xFF00B894), const Color(0xFF55EFC4), const Color(0xFF6C5CE7), const Color(0xFFE17055), const Color(0xFF0984E3)];
+      Uint8List? imageBytes;
+      try {
+        final photo = (p['photo'] as String?) ?? '';
+        if (photo.isNotEmpty) {
+          imageBytes = base64Decode(photo);
+        }
+      } catch (_) {}
       setState(() {
         _projectName = name;
         _projectInitials = name.split(' ').where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join().toUpperCase();
@@ -66,7 +78,20 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         _backendUrl = (p['backend_url'] as String?) ?? '';
         _projectColor = colors[hash.abs() % colors.length];
         _backendType = _backendUrl.contains('supabase') ? 'supabase' : 'generic';
+        _projectImageBytes = imageBytes;
       });
+    }
+    final orgs = await _backend.getOrganizations();
+    if (orgs.isNotEmpty) {
+      final members = await _backend.getMembers(orgs.first['id'] as String);
+      members.sort((a, b) {
+        final dateA = (a['created_at'] as String?) ?? '';
+        final dateB = (b['created_at'] as String?) ?? '';
+        return dateA.compareTo(dateB);
+      });
+      if (members.isNotEmpty && mounted) {
+        setState(() => _userRole = (members.first['role'] as String?) ?? 'admin');
+      }
     }
     final msgs = await _backend.getMessages(widget.projectId);
     setState(() {
@@ -129,10 +154,12 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                       Container(
                         width: 40, height: 40,
                         decoration: BoxDecoration(
-                          gradient: LinearGradient(colors: [_projectColor, _projectColor.withOpacity(0.7)], begin: Alignment.topLeft, end: Alignment.bottomRight),
+                          gradient: _projectImageBytes == null ? LinearGradient(colors: [_projectColor, _projectColor.withOpacity(0.7)], begin: Alignment.topLeft, end: Alignment.bottomRight) : null,
                           borderRadius: BorderRadius.circular(50),
                         ),
-                        child: Center(child: Text(_projectInitials, style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w700))),
+                        child: _projectImageBytes != null
+                            ? ClipOval(child: Image.memory(_projectImageBytes!, width: 40, height: 40, fit: BoxFit.cover))
+                            : Center(child: Text(_projectInitials, style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w700))),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
@@ -311,6 +338,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
             ),
 
           // Input bar
+          if (_userRole != 'viewer')
           Positioned(
             bottom: 16, left: 16, right: 16,
             child: ClipRRect(
@@ -789,7 +817,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     final msgIndex = _messages.indexOf(msg);
 
     return GestureDetector(
-      onLongPressStart: (details) {
+      onLongPressStart: _userRole == 'viewer' ? null : (details) {
         setState(() => _selectedMessageIndex = msgIndex);
         _showMessageOptions(msg, details.globalPosition);
       },

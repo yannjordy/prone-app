@@ -4,7 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'dart:typed_data';
-import 'package:image_picker/image_picker.dart';
+import 'dart:convert';
 import 'dart:ui';
 import '../../app/app.dart';
 import '../../core/local/local_backend.dart';
@@ -38,8 +38,6 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
   int _createFormStep = 0;
   bool _backendVerified = false;
   bool _isVerifying = false;
-  Uint8List? _projectImageBytes;
-  final _imagePicker = ImagePicker();
   late final AnimationController _verifyingAnimController;
 
   @override
@@ -69,10 +67,18 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
     setState(() {
       _projects = rawProjects.map((p) {
         final name = (p['name'] as String?) ?? '';
+        final id = (p['id'] as String?) ?? '';
         final initials = name.split(' ').where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join().toUpperCase();
         final colorValue = name.hashCode.abs() % 0xFFFFFF;
+        Uint8List? imageBytes;
+        try {
+          final photo = (p['photo'] as String?) ?? '';
+          if (photo.isNotEmpty) {
+            imageBytes = base64Decode(photo);
+          }
+        } catch (_) {}
         return _Project(
-          id: (p['id'] as String?) ?? '',
+          id: id,
           name: name,
           initials: initials.isEmpty ? '??' : initials,
           color: Color(0xFF000000 + colorValue),
@@ -84,6 +90,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
           isPinned: (p['is_pinned'] as int?) == 1,
           apiKey: (p['api_key'] as String?) ?? '',
           backendUrl: (p['backend_url'] as String?) ?? '',
+          imageBytes: imageBytes,
         );
       }).toList();
     });
@@ -679,9 +686,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
             decoration: BoxDecoration(color: surfaceColor.withOpacity(0.95), borderRadius: BorderRadius.circular(24), border: Border.all(color: borderColor)),
             child: _createFormStep == 0
                 ? _buildStepFields(surfaceColor, borderColor, textColor, textDimColor)
-                : _createFormStep == 1
-                    ? _buildStepVerifying(textColor, textDimColor)
-                    : _buildStepPhoto(textColor, textDimColor),
+                : _buildStepVerifying(textColor, textDimColor),
           ),
         ),
       ),
@@ -706,7 +711,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
         const SizedBox(height: 20),
         Row(
           children: [
-            Expanded(child: GestureDetector(onTap: () => setState(() { _showCreateForm = false; _createFormStep = 0; _projectImageBytes = null; }), child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: surfaceColor, borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)), child: Center(child: Text('Annuler', style: TextStyle(color: textDimColor, fontSize: 14)))))),
+            Expanded(child: GestureDetector(onTap: () => setState(() { _showCreateForm = false; _createFormStep = 0; }), child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: surfaceColor, borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)), child: Center(child: Text('Annuler', style: TextStyle(color: textDimColor, fontSize: 14)))))),
             const SizedBox(width: 12),
             Expanded(child: GestureDetector(onTap: _verifyBackend, child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Verifier', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))))),
           ],
@@ -743,49 +748,6 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
         const SizedBox(height: 8),
         Text('Test de connexion au backend', style: TextStyle(fontSize: 13, color: textDimColor)),
         const SizedBox(height: 24),
-      ],
-    );
-  }
-
-  Widget _buildStepPhoto(Color textColor, Color textDimColor) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(width: 48, height: 48, decoration: BoxDecoration(color: AppColors.success.withOpacity(0.1), shape: BoxShape.circle), child: const Icon(Icons.check_circle_outline, color: AppColors.success, size: 28)),
-        const SizedBox(height: 12),
-        Text('Backend connecte !', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.success)),
-        const SizedBox(height: 8),
-        Text('Ajoutez une photo de profil', style: TextStyle(fontSize: 13, color: textDimColor)),
-        const SizedBox(height: 24),
-        GestureDetector(
-          onTap: _pickProjectImage,
-          child: Container(
-            width: 100, height: 100,
-            decoration: BoxDecoration(
-              color: ThemeHelper.bg(context),
-              shape: BoxShape.circle,
-              border: Border.all(color: AppColors.success, width: 2),
-            ),
-            child: _projectImageBytes != null
-                ? ClipOval(child: Image.memory(_projectImageBytes!, width: 100, height: 100, fit: BoxFit.cover))
-                : Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.camera_alt_outlined, color: textDimColor, size: 28),
-                      const SizedBox(height: 4),
-                      Text('Photo', style: TextStyle(fontSize: 10, color: textDimColor)),
-                    ],
-                  ),
-          ),
-        ),
-        const SizedBox(height: 24),
-        Row(
-          children: [
-            Expanded(child: GestureDetector(onTap: () => setState(() { _createFormStep = 0; _backendVerified = false; _projectImageBytes = null; }), child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(12), border: Border.all(color: ThemeHelper.borderLight(context))), child: Center(child: Text('Retour', style: TextStyle(color: textDimColor, fontSize: 14)))))),
-            const SizedBox(width: 12),
-            Expanded(child: GestureDetector(onTap: _createProject, child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Creer', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))))),
-          ],
-        ),
       ],
     );
   }
@@ -835,7 +797,8 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
 
       if (!mounted) return;
       if (connected) {
-        setState(() { _createFormStep = 2; _backendVerified = true; _isVerifying = false; });
+        _backendVerified = true;
+        _createProject();
       } else {
         setState(() { _createFormStep = 0; _isVerifying = false; });
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Backend non accessible'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
@@ -844,19 +807,6 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
       if (!mounted) return;
       setState(() { _createFormStep = 0; _isVerifying = false; });
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur de connexion: $e'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
-    }
-  }
-
-  Future<void> _pickProjectImage() async {
-    try {
-      final picked = await _imagePicker.pickImage(source: ImageSource.gallery, maxWidth: 256, maxHeight: 256, imageQuality: 80);
-      if (picked != null) {
-        final bytes = await picked.readAsBytes();
-        setState(() => _projectImageBytes = bytes);
-      }
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur image: $e'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
     }
   }
 
@@ -872,7 +822,6 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
         _showCreateForm = false;
         _createFormStep = 0;
         _backendVerified = false;
-        _projectImageBytes = null;
         _newNameController.clear();
         _newDescController.clear();
         _apiKeyController.clear();
@@ -902,7 +851,8 @@ class _Project {
   bool isPinned;
   final String apiKey;
   final String backendUrl;
-  _Project({required this.id, required this.name, required this.initials, required this.color, required this.lastMessage, required this.time, required this.timestamp, this.unread = 0, this.isArchived = false, this.isMuted = false, this.isPinned = false, this.apiKey = '', this.backendUrl = ''});
+  Uint8List? imageBytes;
+  _Project({required this.id, required this.name, required this.initials, required this.color, required this.lastMessage, required this.time, required this.timestamp, this.unread = 0, this.isArchived = false, this.isMuted = false, this.isPinned = false, this.apiKey = '', this.backendUrl = '', this.imageBytes});
 }
 
 class _MenuItem extends StatelessWidget {
@@ -954,11 +904,13 @@ class _ProjectCard extends StatelessWidget {
                 Container(
                   width: 52, height: 52,
                   decoration: BoxDecoration(
-                    gradient: LinearGradient(colors: [project.color, project.color.withOpacity(0.7)]),
+                    gradient: project.imageBytes == null ? LinearGradient(colors: [project.color, project.color.withOpacity(0.7)]) : null,
                     borderRadius: BorderRadius.circular(50),
                     border: project.isArchived ? Border.all(color: AppColors.warning.withOpacity(0.5), width: 2) : null,
                   ),
-                  child: Center(child: Text(project.initials, style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w700, decoration: project.isArchived ? TextDecoration.lineThrough : null))),
+                  child: project.imageBytes != null
+                      ? ClipOval(child: Image.memory(project.imageBytes!, width: 52, height: 52, fit: BoxFit.cover))
+                      : Center(child: Text(project.initials, style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w700, decoration: project.isArchived ? TextDecoration.lineThrough : null))),
                 ),
                 if (project.isMuted)
                   Positioned(
@@ -1063,8 +1015,10 @@ class _ProjectGridCard extends StatelessWidget {
                   children: [
                     Container(
                       width: 56, height: 56,
-                      decoration: BoxDecoration(gradient: LinearGradient(colors: [project.color, project.color.withOpacity(0.7)]), borderRadius: BorderRadius.circular(50)),
-                      child: Center(child: Text(project.initials, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700))),
+                      decoration: BoxDecoration(gradient: project.imageBytes == null ? LinearGradient(colors: [project.color, project.color.withOpacity(0.7)]) : null, borderRadius: BorderRadius.circular(50)),
+                      child: project.imageBytes != null
+                          ? ClipOval(child: Image.memory(project.imageBytes!, width: 56, height: 56, fit: BoxFit.cover))
+                          : Center(child: Text(project.initials, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700))),
                     ),
                     if (project.isMuted)
                       Positioned(

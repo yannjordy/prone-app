@@ -30,12 +30,13 @@ class LocalBackend {
     return await _db.query('projects', orderBy: 'updated_at DESC');
   }
 
-  Future<Map<String, dynamic>> createProject(String name, String description, {String? apiKey, String? backendUrl}) async {
+  Future<Map<String, dynamic>> createProject(String name, String description, {String? apiKey, String? backendUrl, String? photo}) async {
     final id = _uuid.v4();
     final now = DateTime.now().toIso8601String();
     final project = {
       'id': id, 'name': name, 'description': description,
       'api_key': apiKey ?? '', 'backend_url': backendUrl ?? '',
+      'photo': photo ?? '',
       'is_pinned': 0, 'is_archived': 0, 'is_muted': 0,
       'created_at': now, 'updated_at': now,
     };
@@ -175,7 +176,8 @@ class LocalBackend {
 
   Future<Map<String, dynamic>> addMember(String organizationId, String name, String email, String role) async {
     final id = _uuid.v4();
-    final member = {'id': id, 'organization_id': organizationId, 'name': name, 'email': email, 'role': role, 'created_at': DateTime.now().toIso8601String()};
+    final now = DateTime.now().toIso8601String();
+    final member = {'id': id, 'organization_id': organizationId, 'name': name, 'email': email, 'role': role, 'created_at': now};
     await _db.insert('members', member);
     return member;
   }
@@ -203,6 +205,7 @@ class LocalBackend {
       await _db.insert('projects', {
         'id': projId, 'organization_id': orgId, 'name': p['name'], 'description': p['desc'],
         'api_key': p['key'], 'backend_url': p['url'],
+        'photo': '',
         'is_pinned': 0, 'is_archived': 0, 'is_muted': 0,
         'created_at': now, 'updated_at': now,
       });

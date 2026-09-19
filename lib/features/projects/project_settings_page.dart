@@ -33,6 +33,8 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
   late TabController _tabController;
   List<Map<String, dynamic>> _members = [];
   bool _membersLoading = true;
+  String _currentUserRole = 'admin';
+  bool _isOldestAdmin = true;
 
   static const Map<String, int> _rolePriority = {'admin': 0, 'editor': 1, 'viewer': 2, 'member': 3};
 
@@ -55,11 +57,13 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
   Future<void> _loadProject() async {
     final projects = await _backend.getProjects();
     final p = projects.firstWhere((p) => p['id'] == widget.projectId, orElse: () => <String, dynamic>{});
-    final prefs = await SharedPreferences.getInstance();
-    final savedImage = prefs.getString('project_image_${widget.projectId}');
-    if (savedImage != null && savedImage.isNotEmpty) {
-      try { _projectImageBytes = base64Decode(savedImage); } catch (_) {}
-    }
+    Uint8List? imageBytes;
+    try {
+      final photo = (p['photo'] as String?) ?? '';
+      if (photo.isNotEmpty) {
+        imageBytes = base64Decode(photo);
+      }
+    } catch (_) {}
     if (mounted) {
       setState(() {
         _projectName = (p['name'] as String?) ?? '';
@@ -68,6 +72,7 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
         _backendUrl = (p['backend_url'] as String?) ?? '';
         _nameController.text = _projectName;
         _descController.text = _projectDesc;
+        _projectImageBytes = imageBytes;
         _isLoading = false;
       });
     }
@@ -82,9 +87,18 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
       final roleA = _rolePriority[(a['role'] as String?) ?? 'member'] ?? 3;
       final roleB = _rolePriority[(b['role'] as String?) ?? 'member'] ?? 3;
       if (roleA != roleB) return roleA.compareTo(roleB);
-      return ((a['name'] as String?) ?? '').compareTo((b['name'] as String?) ?? '');
+      final dateA = (a['created_at'] as String?) ?? '';
+      final dateB = (b['created_at'] as String?) ?? '';
+      return dateA.compareTo(dateB);
     });
-    if (mounted) setState(() { _members = members; _membersLoading = false; });
+    final oldestAdmin = members.isNotEmpty ? members.first : <String, dynamic>{};
+    final oldestAdminId = (oldestAdmin['id'] as String?) ?? '';
+    if (mounted) setState(() {
+      _members = members;
+      _currentUserRole = (oldestAdmin['role'] as String?) ?? 'admin';
+      _isOldestAdmin = _currentUserRole == 'admin';
+      _membersLoading = false;
+    });
   }
 
   @override
@@ -128,18 +142,19 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
           GestureDetector(onTap: () => Navigator.pop(context), child: SvgPicture.asset('assets/icons/chevron-left.svg', width: 20, height: 20, colorFilter: ColorFilter.mode(textColor, BlendMode.srcIn))),
           const SizedBox(width: 12),
           Expanded(child: Text('Parametres', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor))),
-          GestureDetector(
-            onTap: _toggleEdit,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              decoration: BoxDecoration(
-                color: _isEditing ? AppColors.success.withOpacity(0.15) : ThemeHelper.bg(context),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: _isEditing ? AppColors.success.withOpacity(0.3) : borderColor),
+          if (_isOldestAdmin)
+            GestureDetector(
+              onTap: _toggleEdit,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: _isEditing ? AppColors.success.withOpacity(0.15) : ThemeHelper.bg(context),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: _isEditing ? AppColors.success.withOpacity(0.3) : borderColor),
+                ),
+                child: Text(_isEditing ? 'Sauvegarder' : 'Modifier', style: TextStyle(fontSize: 13, color: _isEditing ? AppColors.success : textDimColor, fontWeight: FontWeight.w600)),
               ),
-              child: Text(_isEditing ? 'Sauvegarder' : 'Modifier', style: TextStyle(fontSize: 13, color: _isEditing ? AppColors.success : textDimColor, fontWeight: FontWeight.w600)),
             ),
-          ),
         ],
       ),
     );
@@ -193,14 +208,14 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
         ], surfaceColor, borderColor, textColor),
         const SizedBox(height: 12),
         _buildSection('Securite', [
-          _buildSecurityRow('API Key', _maskKey(_apiKey), 'terminal.svg', _isAdmin ? () => _copyToClipboard(_apiKey) : null, textColor, textDimColor),
+          _buildSecurityRow('API Key', _maskKey(_apiKey), 'terminal.svg', _isOldestAdmin ? () => _copyToClipboard(_apiKey) : null, textColor, textDimColor),
           const SizedBox(height: 8),
-          _buildSecurityRow('Backend URL', _backendUrl, 'globe.svg', _isAdmin ? () => _copyToClipboard(_backendUrl) : null, textColor, textDimColor),
-          if (!_isAdmin)
+          _buildSecurityRow('Backend URL', _backendUrl, 'globe.svg', _isOldestAdmin ? () => _copyToClipboard(_backendUrl) : null, textColor, textDimColor),
+          if (!_isOldestAdmin)
             Padding(padding: const EdgeInsets.only(top: 8), child: Row(children: [
               Icon(Icons.lock_outline, size: 14, color: textDimColor),
               const SizedBox(width: 6),
-              Text('Seuls les administrateurs peuvent copier', style: TextStyle(fontSize: 11, color: textDimColor)),
+              Text('Seul l\'admin principal peut copier', style: TextStyle(fontSize: 11, color: textDimColor)),
             ])),
         ], surfaceColor, borderColor, textColor),
         const SizedBox(height: 12),
@@ -259,10 +274,10 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
 
   Future<void> _changePhoto() async {
     try {
-      final bytes = await PhotoPickerHelper.instance.pickImage();
+      final bytes = await PhotoPickerHelper().pickImage();
       if (bytes != null) {
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('project_image_${widget.projectId}', base64Encode(bytes));
+        final base64Photo = base64Encode(bytes);
+        await _backend.updateProject(widget.projectId, {'photo': base64Photo});
         setState(() => _projectImageBytes = Uint8List.fromList(bytes));
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Photo mise a jour'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
@@ -380,18 +395,19 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
             children: [
               Text('${_members.length} membre${_members.length > 1 ? 's' : ''}', style: TextStyle(fontSize: 13, color: textDimColor)),
               const Spacer(),
-              GestureDetector(
-                onTap: () => _showInviteMember(surfaceColor, borderColor, textColor, textDimColor),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.15), borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.primary.withOpacity(0.3))),
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(Icons.person_add_outlined, size: 16, color: AppColors.primary),
-                    const SizedBox(width: 4),
-                    Text('Inviter', style: TextStyle(color: AppColors.primary, fontSize: 13, fontWeight: FontWeight.w600)),
-                  ]),
+              if (_currentUserRole == 'admin' || _currentUserRole == 'editor')
+                GestureDetector(
+                  onTap: () => _showInviteMember(surfaceColor, borderColor, textColor, textDimColor),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.15), borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.primary.withOpacity(0.3))),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.person_add_outlined, size: 16, color: AppColors.primary),
+                      const SizedBox(width: 4),
+                      Text('Inviter', style: TextStyle(color: AppColors.primary, fontSize: 13, fontWeight: FontWeight.w600)),
+                    ]),
+                  ),
                 ),
-              ),
             ],
           ),
         ),
@@ -418,36 +434,36 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
                     final roleColor = role == 'admin' ? AppColors.error : role == 'editor' ? AppColors.primary : AppColors.success;
                     final isLastAdmin = role == 'admin' && _members.where((m2) => (m2['role'] as String?) == 'admin').length <= 1;
 
-                    return Container(
-                      margin: const EdgeInsets.only(bottom: 8),
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(color: surfaceColor, borderRadius: BorderRadius.circular(14), border: Border.all(color: borderColor)),
-                      child: Row(
-                        children: [
-                          Container(
-                            width: 40, height: 40,
-                            decoration: BoxDecoration(color: Color(0xFF000000 + colorValue).withOpacity(0.2), shape: BoxShape.circle),
-                            child: Center(child: Text(initials.isEmpty ? '?' : initials, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Color(0xFF000000 + colorValue)))),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            Text(name, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: textColor)),
-                            Text(email, style: TextStyle(fontSize: 12, color: textDimColor), overflow: TextOverflow.ellipsis),
-                          ])),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                            decoration: BoxDecoration(color: roleColor.withOpacity(0.1), borderRadius: BorderRadius.circular(6)),
-                            child: Text(role.toUpperCase(), style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: roleColor)),
-                          ),
-                          const SizedBox(width: 8),
-                          if (isLastAdmin)
-                            Icon(Icons.shield, size: 18, color: AppColors.warning)
-                          else
-                            GestureDetector(
-                              onTap: () => _confirmRemoveMember(m['id'] as String, name, surfaceColor, borderColor, textColor, textDimColor),
-                              child: Icon(Icons.close_rounded, size: 18, color: AppColors.error.withOpacity(0.7)),
+                    return GestureDetector(
+                      onLongPress: _currentUserRole == 'admin' ? () => _showMemberOptions(m, surfaceColor, borderColor, textColor, textDimColor) : null,
+                      child: Container(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(color: surfaceColor, borderRadius: BorderRadius.circular(14), border: Border.all(color: borderColor)),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 40, height: 40,
+                              decoration: BoxDecoration(color: Color(0xFF000000 + colorValue).withOpacity(0.2), shape: BoxShape.circle),
+                              child: Center(child: Text(initials.isEmpty ? '?' : initials, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Color(0xFF000000 + colorValue)))),
                             ),
-                        ],
+                            const SizedBox(width: 12),
+                            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              Text(name, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: textColor)),
+                              Text(email, style: TextStyle(fontSize: 12, color: textDimColor), overflow: TextOverflow.ellipsis),
+                            ])),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(color: roleColor.withOpacity(0.1), borderRadius: BorderRadius.circular(6)),
+                              child: Text(role.toUpperCase(), style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: roleColor)),
+                            ),
+                            const SizedBox(width: 8),
+                            if (isLastAdmin)
+                              Icon(Icons.shield, size: 18, color: AppColors.warning)
+                            else
+                              Icon(Icons.chevron_right, size: 18, color: textDimColor),
+                          ],
+                        ),
                       ),
                     );
                   },
@@ -738,6 +754,207 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
             ]),
           ),
         ),
+      ),
+    );
+  }
+
+  void _showMemberOptions(Map<String, dynamic> member, Color surfaceColor, Color borderColor, Color textColor, Color textDimColor) {
+    final name = (member['name'] as String?) ?? '';
+    final memberId = (member['id'] as String?) ?? '';
+    final role = (member['role'] as String?) ?? 'member';
+    final createdAt = (member['created_at'] as String?) ?? '';
+    final isOldestAdmin = role == 'admin' && _members.where((m2) => (m2['role'] as String?) == 'admin').every((m2) => (((m2['created_at'] as String?) ?? '').compareTo(createdAt) <= 0));
+    final isLastAdmin = role == 'admin' && _members.where((m2) => (m2['role'] as String?) == 'admin').length <= 1;
+
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'dismiss',
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 250),
+      transitionBuilder: (ctx, a1, a2, child) => FadeTransition(opacity: a1, child: ScaleTransition(scale: CurvedAnimation(parent: a1, curve: Curves.easeOutBack), child: child)),
+      pageBuilder: (ctx, a1, a2) {
+        return Stack(children: [
+          GestureDetector(onTap: () => Navigator.pop(ctx), child: ClipRect(child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12), child: Container(color: Colors.black.withOpacity(0.4))))),
+          Center(child: Material(color: Colors.transparent, child: Container(
+            width: MediaQuery.of(context).size.width * 0.85,
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(color: surfaceColor.withOpacity(0.95), borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 20, offset: const Offset(0, 8))]),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                SvgPicture.asset('assets/icons/users.svg', width: 20, height: 20, colorFilter: ColorFilter.mode(AppColors.primary, BlendMode.srcIn)),
+                const SizedBox(width: 8),
+                Text('Options du membre', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: textColor)),
+              ]),
+              const SizedBox(height: 20),
+              _buildMemberOption('Voir le profil', 'profile.svg', AppColors.primary, () {
+                Navigator.pop(ctx);
+                _showMemberProfile(member, surfaceColor, borderColor, textColor, textDimColor);
+              }),
+              if (!isOldestAdmin) ...[
+                const SizedBox(height: 8),
+                _buildMemberOption('Changer le grade', 'edit.svg', const Color(0xFF00CEC9), () {
+                  Navigator.pop(ctx);
+                  _showRoleChange(member, surfaceColor, borderColor, textColor, textDimColor);
+                }),
+              ],
+              if (!isOldestAdmin && !isLastAdmin) ...[
+                const SizedBox(height: 8),
+                _buildMemberOption('Retirer', 'trash.svg', AppColors.error, () {
+                  Navigator.pop(ctx);
+                  _confirmRemoveMember(memberId, name, surfaceColor, borderColor, textColor, textDimColor);
+                }),
+              ],
+              if (isOldestAdmin) ...[
+                const SizedBox(height: 8),
+                _buildMemberOption('Admin principal', 'shield.svg', AppColors.warning, () => Navigator.pop(ctx)),
+              ],
+            ]),
+          ))),
+        ]);
+      },
+    );
+  }
+
+  Widget _buildMemberOption(String label, String icon, Color color, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(color: color.withOpacity(0.08), borderRadius: BorderRadius.circular(12)),
+        child: Row(children: [
+          SvgPicture.asset('assets/icons/$icon', width: 18, height: 18, colorFilter: ColorFilter.mode(color, BlendMode.srcIn)),
+          const SizedBox(width: 12),
+          Text(label, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: color)),
+        ]),
+      ),
+    );
+  }
+
+  void _showMemberProfile(Map<String, dynamic> member, Color surfaceColor, Color borderColor, Color textColor, Color textDimColor) {
+    final name = (member['name'] as String?) ?? '';
+    final email = (member['email'] as String?) ?? '';
+    final role = (member['role'] as String?) ?? 'member';
+    final initials = name.split(' ').where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join().toUpperCase();
+    final colorValue = name.hashCode.abs() % 0xFFFFFF;
+    final roleColor = role == 'admin' ? AppColors.error : role == 'editor' ? AppColors.primary : AppColors.success;
+
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'dismiss',
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 250),
+      transitionBuilder: (ctx, a1, a2, child) => FadeTransition(opacity: a1, child: ScaleTransition(scale: CurvedAnimation(parent: a1, curve: Curves.easeOutBack), child: child)),
+      pageBuilder: (ctx, a1, a2) {
+        return Stack(children: [
+          GestureDetector(onTap: () => Navigator.pop(ctx), child: ClipRect(child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12), child: Container(color: Colors.black.withOpacity(0.4))))),
+          Center(child: Material(color: Colors.transparent, child: Container(
+            width: MediaQuery.of(context).size.width * 0.85,
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(color: surfaceColor.withOpacity(0.95), borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 20, offset: const Offset(0, 8))]),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Container(width: 72, height: 72, decoration: BoxDecoration(
+                gradient: LinearGradient(colors: [Color(0xFF000000 + colorValue), Color(0xFF000000 + colorValue).withOpacity(0.7)]),
+                shape: BoxShape.circle, border: Border.all(color: surfaceColor, width: 3),
+              ), child: Center(child: Text(initials.isEmpty ? '?' : initials, style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w700)))),
+              const SizedBox(height: 16),
+              Text(name, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
+              const SizedBox(height: 4),
+              Text('@${name.toLowerCase().replaceAll(' ', '')}', style: TextStyle(fontSize: 13, color: textDimColor)),
+              const SizedBox(height: 12),
+              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                Icon(Icons.email_outlined, size: 16, color: textDimColor),
+                const SizedBox(width: 6),
+                Text(email, style: TextStyle(fontSize: 13, color: textDimColor)),
+              ]),
+              const SizedBox(height: 12),
+              Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                decoration: BoxDecoration(color: roleColor.withOpacity(0.1), borderRadius: BorderRadius.circular(8)),
+                child: Text(role.toUpperCase(), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: roleColor))),
+              const SizedBox(height: 20),
+              GestureDetector(onTap: () => Navigator.pop(ctx), child: Container(
+                width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 14),
+                decoration: BoxDecoration(color: ThemeHelper.bg(ctx), borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)),
+                child: Center(child: Text('Fermer', style: TextStyle(color: textDimColor, fontSize: 14))),
+              )),
+            ]),
+          ))),
+        ]);
+      },
+    );
+  }
+
+  void _showRoleChange(Map<String, dynamic> member, Color surfaceColor, Color borderColor, Color textColor, Color textDimColor) {
+    final name = (member['name'] as String?) ?? '';
+    final currentRole = (member['role'] as String?) ?? 'member';
+    final memberId = (member['id'] as String?) ?? '';
+
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'dismiss',
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 250),
+      transitionBuilder: (ctx, a1, a2, child) => FadeTransition(opacity: a1, child: ScaleTransition(scale: CurvedAnimation(parent: a1, curve: Curves.easeOutBack), child: child)),
+      pageBuilder: (ctx, a1, a2) {
+        return Stack(children: [
+          GestureDetector(onTap: () => Navigator.pop(ctx), child: ClipRect(child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12), child: Container(color: Colors.black.withOpacity(0.4))))),
+          Center(child: Material(color: Colors.transparent, child: Container(
+            width: MediaQuery.of(context).size.width * 0.85,
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(color: surfaceColor.withOpacity(0.95), borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 20, offset: const Offset(0, 8))]),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Text('Changer le grade de $name', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: textColor)),
+              const SizedBox(height: 20),
+              Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+                _buildRoleOption('Admin', 'admin', AppColors.error, currentRole, memberId, ctx),
+                _buildRoleOption('Editeur', 'editor', AppColors.primary, currentRole, memberId, ctx),
+                _buildRoleOption('Lecteur', 'viewer', AppColors.success, currentRole, memberId, ctx),
+              ]),
+              const SizedBox(height: 16),
+              GestureDetector(onTap: () => Navigator.pop(ctx), child: Container(
+                width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 14),
+                decoration: BoxDecoration(color: ThemeHelper.bg(ctx), borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)),
+                child: Center(child: Text('Annuler', style: TextStyle(color: textDimColor, fontSize: 14))),
+              )),
+            ]),
+          ))),
+        ]);
+      },
+    );
+  }
+
+  Widget _buildRoleOption(String label, String role, Color color, String currentRole, String memberId, BuildContext ctx) {
+    final isSelected = currentRole == role;
+    return GestureDetector(
+      onTap: () async {
+        if (isSelected) return;
+        final orgs = await _backend.getOrganizations();
+        if (orgs.isNotEmpty) {
+          final orgId = orgs.first['id'] as String;
+          final members = await _backend.getMembers(orgId);
+          final m = members.firstWhere((x) => x['id'] == memberId, orElse: () => <String, dynamic>{});
+          if (m.isNotEmpty) {
+            await _backend.removeMember(orgId, memberId);
+            await _backend.addMember(orgId, (m['name'] as String?) ?? '', (m['email'] as String?) ?? '', role);
+          }
+        }
+        _loadMembers();
+        if (mounted) Navigator.pop(ctx);
+      },
+      child: Container(
+        width: 90, padding: const EdgeInsets.symmetric(vertical: 16),
+        decoration: BoxDecoration(
+          color: isSelected ? color.withOpacity(0.2) : color.withOpacity(0.05),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: isSelected ? color : color.withOpacity(0.3), width: isSelected ? 2 : 1),
+        ),
+        child: Column(children: [
+          Icon(isSelected ? Icons.check_circle : Icons.circle_outlined, color: color, size: 24),
+          const SizedBox(height: 8),
+          Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: color)),
+        ]),
       ),
     );
   }
