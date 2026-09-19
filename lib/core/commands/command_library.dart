@@ -19,6 +19,13 @@ class CommandLibrary {
       execute: (params) => _status(),
     ),
     Command(
+      name: 'protect',
+      description: 'Rapport sécurité du Bot Protector',
+      category: 'System',
+      icon: 'assets/icons/shield.svg',
+      execute: (params) => _protect(),
+    ),
+    Command(
       name: 'ping',
       description: 'Test de connexion',
       category: 'System',
@@ -224,6 +231,23 @@ class CommandLibrary {
         '✅ Queue      - Running\n\n'
         'CPU: 23% | RAM: 512MB/1GB\n'
         'Latence: 45ms';
+  }
+
+  static String _protect() {
+    return '🛡️ Bot Protector\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+        '  Statut:    Actif\n'
+        '  Mode:      Surveillance continue\n'
+        '  Fréquence: Checks toutes les 45s\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+        '  Capacités:\n'
+        '  • Santé backend en temps réel\n'
+        '  • Détection d\'erreurs 5xx\n'
+        '  • Alertes temps de réponse\n'
+        '  • Détection d\'intrusion\n'
+        '  • Surveillance d\'anomalies\n'
+        '  • Rapport: /protect\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
   }
 
   static String _ping() {

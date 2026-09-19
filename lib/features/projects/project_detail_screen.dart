@@ -8,9 +8,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:typed_data';
 import 'dart:convert';
 import 'dart:ui';
+import 'dart:async';
 import '../../app/app.dart';
 import '../../core/commands/command_library.dart';
 import '../../core/security/security_service.dart';
+import '../../core/security/bot_protector.dart';
 import '../../core/local/local_backend.dart';
 import '../../core/utils/photo_picker_helper.dart';
 
@@ -33,6 +35,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   int? _selectedMessageIndex;
   String _selectedCategory = 'All';
   final _backend = LocalBackend();
+  final _protector = BotProtector();
 
   String _projectName = 'Projet';
   String _projectInitials = 'P';
@@ -155,6 +158,39 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
       }
     });
+    // Start bot protector monitoring
+    _protector.startMonitoring(_backendUrl, _projectApiKey, _backendType, _onSecurityAlert);
+  }
+
+  void _onSecurityAlert(SecurityAlert alert) {
+    if (!mounted) return;
+    final levelMap = {
+      AlertLevel.info: MessageLevel.info,
+      AlertLevel.warning: MessageLevel.warning,
+      AlertLevel.error: MessageLevel.error,
+      AlertLevel.critical: MessageLevel.critical,
+      AlertLevel.offline: MessageLevel.offline,
+    };
+    setState(() {
+      _messages.add(_ChatMessage(
+        sender: _members.first,
+        text: '${alert.title}\n\n${alert.message}${alert.details != null ? "\n\n${alert.details}" : ""}',
+        timestamp: DateTime.now(),
+        level: levelMap[alert.level] ?? MessageLevel.info,
+        alertTitle: alert.title,
+      ));
+    });
+    if (_scrollController.hasClients) {
+      _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+    }
+  }
+
+  @override
+  void dispose() {
+    _protector.stopMonitoring();
+    _controller.dispose();
+    _scrollController.dispose();
+    super.dispose();
   }
 
   @override
@@ -1096,6 +1132,87 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     );
   }
 
+  Widget _buildAlertBubble(_ChatMessage msg, int msgIndex, bool isBot, bool isCurrentUser) {
+    final isSelected = _selectedMessageIndex == msgIndex;
+
+    // Alert level colors
+    Color bubbleColor;
+    Color borderColor;
+    Widget? alertIcon;
+
+    switch (msg.level) {
+      case MessageLevel.critical:
+        bubbleColor = const Color(0xFFFF6B6B).withOpacity(0.12);
+        borderColor = const Color(0xFFFF6B6B).withOpacity(0.4);
+        alertIcon = const Icon(Icons.dangerous_outlined, size: 14, color: Color(0xFFFF6B6B));
+        break;
+      case MessageLevel.error:
+        bubbleColor = const Color(0xFFFF4757).withOpacity(0.10);
+        borderColor = const Color(0xFFFF4757).withOpacity(0.35);
+        alertIcon = const Icon(Icons.error_outline, size: 14, color: Color(0xFFFF4757));
+        break;
+      case MessageLevel.warning:
+        bubbleColor = const Color(0xFFFFA502).withOpacity(0.10);
+        borderColor = const Color(0xFFFFA502).withOpacity(0.35);
+        alertIcon = const Icon(Icons.warning_amber_rounded, size: 14, color: Color(0xFFFFA502));
+        break;
+      case MessageLevel.offline:
+        bubbleColor = Colors.white.withOpacity(0.08);
+        borderColor = Colors.white.withOpacity(0.2);
+        alertIcon = const Icon(Icons.cloud_off_rounded, size: 14, color: Colors.white54);
+        break;
+      case MessageLevel.info:
+      default:
+        bubbleColor = isSelected
+            ? AppColors.primary.withOpacity(0.08)
+            : isCurrentUser ? AppColors.primary.withOpacity(0.15) : ThemeHelper.surface(context);
+        borderColor = isSelected
+            ? AppColors.primary.withOpacity(0.5)
+            : isCurrentUser ? AppColors.primary.withOpacity(0.3) : ThemeHelper.borderLight(context);
+        alertIcon = null;
+        break;
+    }
+
+    // Alert title header
+    Widget? header;
+    if (msg.alertTitle != null) {
+      header = Container(
+        margin: const EdgeInsets.only(bottom: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: msg.level == MessageLevel.critical ? const Color(0xFFFF6B6B).withOpacity(0.15)
+              : msg.level == MessageLevel.error ? const Color(0xFFFF4757).withOpacity(0.12)
+              : msg.level == MessageLevel.warning ? const Color(0xFFFFA502).withOpacity(0.12)
+              : msg.level == MessageLevel.offline ? Colors.white.withOpacity(0.06)
+              : AppColors.primary.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          if (alertIcon != null) ...[alertIcon, const SizedBox(width: 4)],
+          Flexible(child: Text(msg.alertTitle!, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
+              color: msg.level == MessageLevel.critical ? const Color(0xFFFF6B6B)
+                  : msg.level == MessageLevel.error ? const Color(0xFFFF4757)
+                  : msg.level == MessageLevel.warning ? const Color(0xFFFFA502)
+                  : msg.level == MessageLevel.offline ? Colors.white54
+                  : AppColors.primary), overflow: TextOverflow.ellipsis)),
+        ]),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: bubbleColor,
+        borderRadius: BorderRadius.only(topLeft: const Radius.circular(16), topRight: const Radius.circular(16), bottomLeft: Radius.circular(isCurrentUser ? 16 : 4), bottomRight: Radius.circular(isCurrentUser ? 4 : 16)),
+        border: Border.all(color: borderColor),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        if (header != null) header,
+        _buildMessageText(msg.text, isBot),
+      ]),
+    );
+  }
+
   Widget _buildMessage(_ChatMessage msg) {
     final isBot = msg.sender.isBot;
     final isCurrentUser = msg.sender == _currentUser;
@@ -1181,19 +1298,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                           ),
                         ),
                       // Message bubble
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                        decoration: BoxDecoration(
-                          color: _selectedMessageIndex == msgIndex
-                              ? AppColors.primary.withOpacity(0.08)
-                              : isCurrentUser ? AppColors.primary.withOpacity(0.15) : ThemeHelper.surface(context),
-                          borderRadius: BorderRadius.only(topLeft: const Radius.circular(16), topRight: const Radius.circular(16), bottomLeft: Radius.circular(isCurrentUser ? 16 : 4), bottomRight: Radius.circular(isCurrentUser ? 4 : 16)),
-                          border: Border.all(color: _selectedMessageIndex == msgIndex
-                              ? AppColors.primary.withOpacity(0.5)
-                              : isCurrentUser ? AppColors.primary.withOpacity(0.3) : ThemeHelper.borderLight(context)),
-                        ),
-                        child: _buildMessageText(msg.text, isBot),
-                      ),
+                      _buildAlertBubble(msg, msgIndex, isBot, isCurrentUser),
                       const SizedBox(height: 4),
                       Text('${msg.timestamp.hour}:${msg.timestamp.minute.toString().padLeft(2, '0')}', style: TextStyle(fontSize: 11, color: ThemeHelper.textDim(context))),
                     ],
@@ -1452,11 +1557,13 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       } else {
         final lower = command.toLowerCase();
         if (lower == '/help' || lower == '/aide') {
-          response = '🤖 Commandes Prone:\n\n/status - Vérifier le backend\n/test - Tester la connexion\n/tables - Lister les tables\n/help - Aide\n\n💡 Commandes backend (requêtes HTTP):\nGET /produits - Lire des données\nPOST /produits - Créer une ressource\nPUT /produits?id=1 - Modifier\nDELETE /produits?id=1 - Supprimer\n\n📝 Requête Supabase:\nGET /produits?select=*&statut=eq.published\nGET /produits?select=nom,prix&limit=5';
+          response = '🤖 Commandes Prone:\n\n/status - Vérifier le backend\n/test - Tester la connexion\n/tables - Lister les tables\n/protect - Rapport sécurité\n/help - Aide\n\n💡 Commandes backend:\nGET /produits - Lire\nPOST /produits - Créer\nPUT /produits?id=1 - Modifier\nDELETE /produits?id=1 - Supprimer';
         } else if (lower == '/status' || lower == '/test') {
           response = await _checkBackendStatus();
         } else if (lower == '/tables') {
           response = await _listTables();
+        } else if (lower == '/protect') {
+          response = _protector.getStatusReport();
         } else {
           response = '❌ Commande inconnue: "$command"\n\nTapez /help pour voir les commandes disponibles.';
         }
@@ -1621,12 +1728,16 @@ class _Member {
   _Member({required this.name, required this.initials, required this.color, this.isOnline = false, this.isBot = false, this.photo, this.role, this.email});
 }
 
+enum MessageLevel { info, warning, error, critical, offline }
+
 class _ChatMessage {
   final _Member sender;
   final String text;
   final DateTime timestamp;
   final int? replyToIndex;
-  _ChatMessage({required this.sender, required this.text, required this.timestamp, this.replyToIndex});
+  final MessageLevel level;
+  final String? alertTitle;
+  _ChatMessage({required this.sender, required this.text, required this.timestamp, this.replyToIndex, this.level = MessageLevel.info, this.alertTitle});
 }
 
 class _SettingsItem extends StatelessWidget {
