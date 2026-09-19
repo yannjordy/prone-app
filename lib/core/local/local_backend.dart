@@ -65,35 +65,10 @@ class LocalBackend {
     final now = DateTime.now().toIso8601String();
     final msg = {'id': id, 'project_id': projectId, 'content': content, 'sender': sender, 'is_bot': sender == 'bot' ? 1 : 0, 'created_at': now};
     await _db.insert('messages', msg);
-
-    if (sender == 'user') {
-      final botReply = _generateBotReply(content);
-      await _db.insert('messages', {'id': _uuid.v4(), 'project_id': projectId, 'content': botReply, 'sender': 'bot', 'is_bot': 1, 'created_at': DateTime.now().toIso8601String()});
-      await _db.update('projects', {'updated_at': now}, where: 'id = ?', whereArgs: [projectId]);
-    }
+    await _db.update('projects', {'updated_at': now}, where: 'id = ?', whereArgs: [projectId]);
     return msg;
   }
 
-  String _generateBotReply(String userMessage) {
-    final lower = userMessage.toLowerCase();
-    if (lower.contains('health') || lower.contains('status')) {
-      return '✅ Backend status: All systems operational.\n• API: Online (200 OK)\n• Database: Connected\n• Uptime: 99.98%';
-    } else if (lower.contains('deploy') || lower.contains('deployer')) {
-      return '🚀 Deployment initiated...\n• Building project...\n• Running tests...\n• Deploying to production...\n✅ Deployment successful!';
-    } else if (lower.contains('log') || lower.contains('erreur') || lower.contains('error')) {
-      return '📋 Recent logs:\n• [INFO] Request handled - 200 OK\n• [WARN] Slow query detected (1.2s)\n• [INFO] Cache hit ratio: 94%\nNo critical errors found.';
-    } else if (lower.contains('endpoint') || lower.contains('route')) {
-      return '🔗 Active endpoints:\n• GET /api/products\n• POST /api/orders\n• GET /api/users\n• PUT /api/inventory\n\nTotal: 12 endpoints';
-    } else if (lower.contains('test')) {
-      return '🧪 Running test suite...\n• Unit tests: 45/45 passed\n• Integration tests: 12/12 passed\n• Coverage: 87%\n✅ All tests passed!';
-    } else if (lower.contains('help') || lower.contains('aide')) {
-      return '🤖 Available commands:\n• "health" - Check backend status\n• "deploy" - Deploy your app\n• "logs" - View recent logs\n• "endpoints" - List API routes\n• "test" - Run test suite\n• "stats" - View statistics';
-    } else if (lower.contains('stat') || lower.contains('metric')) {
-      return '📊 Statistics (last 24h):\n• Requests: 12,847\n• Avg response: 124ms\n• Error rate: 0.02%\n• Active users: 234';
-    } else {
-      return '🤖 Command received: "$userMessage"\n\nI can help you manage your backend. Try:\n• "health" - Check status\n• "deploy" - Deploy\n• "logs" - View logs\n• "help" - All commands';
-    }
-  }
 
   Future<List<Map<String, dynamic>>> getConnections(String projectId) async {
     return await _db.query('connections', where: 'project_id = ?', whereArgs: [projectId]);

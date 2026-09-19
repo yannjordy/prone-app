@@ -296,62 +296,73 @@ class CommandLibrary {
   static String _schema(List<String> params) {
     if (params.isEmpty) return '❌ Usage: /schema <table>';
     final table = params[0];
-    return '📐 Structure de la table "$table" :\n\n'
-        '| Colonne    | Type         | Null | Default |\n'
-        '|------------|--------------|------|---------|\n'
-        '| id         | uuid         | NO   | gen_uuid() |\n'
-        '| name       | varchar(255) | NO   | -       |\n'
-        '| email      | varchar(255) | YES  | NULL    |\n'
-        '| created_at | timestamp    | NO   | now()   |\n'
-        '| updated_at | timestamp    | NO   | now()   |';
+    return '📐 Structure de la table "$table"\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+        '  Colonne       Type           Null\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+        '  id            uuid           NON\n'
+        '  name          varchar(255)   NON\n'
+        '  email         varchar(255)   OUI\n'
+        '  created_at    timestamp      NON\n'
+        '  updated_at    timestamp      NON\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
   }
 
   static String _last(List<String> params) {
     if (params.isEmpty) return '❌ Usage: /last <table> [limit]';
     final table = params[0];
     final limit = params.length > 1 ? params[1] : '5';
-    return '📜 Dernières $limit entrées de "$table" :\n\n'
-        '| id | name           | created_at       |\n'
-        '|----|----------------|------------------|\n'
-        '| 45 | New Product    | 2024-01-15 14:32 |\n'
-        '| 44 | Another Item   | 2024-01-15 14:15 |\n'
-        '| 43 | Test Product   | 2024-01-15 13:50 |\n'
-        '| 42 | Featured Item  | 2024-01-15 12:00 |\n'
-        '| 41 | Last Product   | 2024-01-15 11:30 |';
+    return '📜 Dernières $limit entrées de "$table"\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+        '  id   name              date\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+        '  45   New Product       2024-01-15\n'
+        '  44   Another Item      2024-01-15\n'
+        '  43   Test Product      2024-01-15\n'
+        '  42   Featured Item     2024-01-15\n'
+        '  41   Last Product      2024-01-15\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
   }
 
   static String _search(List<String> params) {
     if (params.length < 3) return '❌ Usage: /search <table> <field> <value>';
-    return '🔎 Résultats de recherche :\n\n'
-        'Table: ${params[0]}\n'
-        'Champ: ${params[1]}\n'
-        'Valeur: ${params[2]}\n\n'
-        '| id | ${params[1]}      | match           |\n'
-        '|----|------------|------------------|\n'
-        '| 12 | ${params[2]} | exact           |\n'
-        '| 23 | ${params[2]}X | partial         |';
+    return '🔎 Résultats de recherche\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+        '  Table:   ${params[0]}\n'
+        '  Champ:   ${params[1]}\n'
+        '  Valeur:  ${params[2]}\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+        '  id   ${params[1]}          type\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+        '  12   ${params[2]}       exact\n'
+        '  23   ${params[2]}X      partiel\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
   }
 
   static String _endpoints() {
-    return '🌐 Endpoints API :\n\n'
-        'GET    /api/users\n'
-        'GET    /api/users/:id\n'
-        'POST   /api/users\n'
-        'PUT    /api/users/:id\n'
-        'DELETE /api/users/:id\n\n'
-        'GET    /api/orders\n'
-        'POST   /api/orders\n'
-        'GET    /api/products\n'
-        'POST   /api/webhooks/:id/trigger';
+    return '🌐 Endpoints API\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+        '  GET    /api/users\n'
+        '  GET    /api/users/:id\n'
+        '  POST   /api/users\n'
+        '  PUT    /api/users/:id\n'
+        '  DELETE /api/users/:id\n'
+        '  GET    /api/orders\n'
+        '  POST   /api/orders\n'
+        '  GET    /api/products\n'
+        '  POST   /api/webhooks/:id/trigger\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
   }
 
   static String _requests() {
-    return '📨 Dernières requêtes :\n\n'
-        '14:32 GET  /api/users      200  45ms\n'
-        '14:31 POST /api/orders     201  120ms\n'
-        '14:30 GET  /api/products   200  32ms\n'
-        '14:28 POST /api/auth/login 200  89ms\n'
-        '14:25 GET  /api/users/123  200  38ms';
+    return '📨 Dernières requêtes\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+        '  14:32  GET  /api/users       200\n'
+        '  14:31  POST /api/orders      201\n'
+        '  14:30  GET  /api/products    200\n'
+        '  14:28  POST /api/auth/login  200\n'
+        '  14:25  GET  /api/users/123   200\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
   }
 
   static String _errors() {

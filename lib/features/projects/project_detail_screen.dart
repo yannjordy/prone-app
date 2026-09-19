@@ -567,42 +567,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                   ),
                 ),
                 const SizedBox(height: 16),
-                // Invite buttons
-                if (_userRole == 'admin' || _userRole == 'editor')
-                  Row(
-                    children: [
-                      Expanded(
-                        child: GestureDetector(
-                          onTap: () { Navigator.pop(context); _inviteMember(); },
-                          child: Container(
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.1), borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.primary.withOpacity(0.3))),
-                            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                              Icon(Icons.person_add, color: AppColors.primary, size: 18),
-                              const SizedBox(width: 8),
-                              Text('Email', style: TextStyle(fontSize: 13, color: AppColors.primary, fontWeight: FontWeight.w600)),
-                            ]),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: GestureDetector(
-                          onTap: () { Navigator.pop(context); _showQRCode(); },
-                          child: Container(
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(color: AppColors.success.withOpacity(0.1), borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.success.withOpacity(0.3))),
-                            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                              Icon(Icons.qr_code, color: AppColors.success, size: 18),
-                              const SizedBox(width: 8),
-                              Text('QR Code', style: TextStyle(fontSize: 13, color: AppColors.success, fontWeight: FontWeight.w600)),
-                            ]),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 8),
                 // Members list
                 Flexible(
                   child: ListView.builder(
