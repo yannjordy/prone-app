@@ -12,6 +12,7 @@ import '../../app/app.dart';
 import '../../core/commands/command_library.dart';
 import '../../core/security/security_service.dart';
 import '../../core/local/local_backend.dart';
+import '../../core/utils/photo_picker_helper.dart';
 
 class ProjectDetailScreen extends StatefulWidget {
   final String projectId;
@@ -97,8 +98,37 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         final dateB = (b['created_at'] as String?) ?? '';
         return dateA.compareTo(dateB);
       });
-      if (members.isNotEmpty && mounted) {
-        setState(() => _userRole = (members.first['role'] as String?) ?? 'admin');
+      if (mounted) {
+        final memberList = <_Member>[];
+        // Load bot photo
+        Uint8List? botPhoto;
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          final savedBotPhoto = prefs.getString('bot_photo_${widget.projectId}');
+          if (savedBotPhoto != null && savedBotPhoto.isNotEmpty) {
+            botPhoto = base64Decode(savedBotPhoto);
+          }
+        } catch (_) {}
+        final botName = await _getBotName();
+        memberList.add(_Member(name: botName, initials: 'BOT', color: const Color(0xFF55EFC4), isOnline: true, isBot: true, photo: botPhoto));
+        for (final m in members) {
+          final name = (m['name'] as String?) ?? '';
+          final email = (m['email'] as String?) ?? '';
+          final role = (m['role'] as String?) ?? 'member';
+          final photo = (m['photo'] as String?) ?? '';
+          Uint8List? photoBytes;
+          try { if (photo.isNotEmpty) photoBytes = base64Decode(photo); } catch (_) {}
+          final hash = name.hashCode;
+          final colors = [AppColors.primary, const Color(0xFF00CEC9), const Color(0xFF00B894), const Color(0xFF6C5CE7), const Color(0xFFE17055)];
+          final colorVal = colors[hash.abs() % colors.length];
+          final initials = name.split(' ').where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join().toUpperCase();
+          memberList.add(_Member(name: name.isEmpty ? email : name, initials: initials.isEmpty ? '?' : initials, color: colorVal, isOnline: true, photo: photoBytes, role: role, email: email));
+        }
+        setState(() {
+          _members.clear();
+          _members.addAll(memberList);
+          _userRole = (members.isNotEmpty ? (members.first['role'] as String?) : null) ?? 'admin';
+        });
       }
     }
     final msgs = await _backend.getMessages(widget.projectId);
@@ -350,6 +380,53 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
               ),
             ),
 
+          // @ Mention autocomplete
+          if (_isMentioning && _userRole != 'viewer')
+            Positioned(
+              bottom: 80, left: 16, right: 16,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+                  child: Container(
+                    constraints: BoxConstraints(maxHeight: 200),
+                    decoration: BoxDecoration(
+                      color: ThemeHelper.surface(context).withOpacity(0.95),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: ThemeHelper.borderLight(context)),
+                      boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 12, offset: const Offset(0, 4))],
+                    ),
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      itemCount: _members.where((m) => !m.isBot && m.name.toLowerCase().contains(_getMentionQuery())).length,
+                      itemBuilder: (context, index) {
+                        final filtered = _members.where((m) => !m.isBot && m.name.toLowerCase().contains(_getMentionQuery())).toList();
+                        final m = filtered[index];
+                        return Material(
+                          color: Colors.transparent,
+                          child: InkWell(
+                            onTap: () => _selectMention(m),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                              child: Row(children: [
+                                _buildAvatar(m, size: 32),
+                                const SizedBox(width: 10),
+                                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                  Text(m.name, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: ThemeHelper.text(context))),
+                                  Text(m.email ?? '', style: TextStyle(fontSize: 11, color: ThemeHelper.textDim(context))),
+                                ]),
+                              ]),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
           // Input bar
           if (_userRole != 'viewer')
           Positioned(
@@ -429,47 +506,102 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                 Text('Membres du projet', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: ThemeHelper.text(context))),
                 const SizedBox(height: 4),
                 Text('${_members.length} membres', style: TextStyle(fontSize: 13, color: ThemeHelper.textDim(context))),
+                const SizedBox(height: 20),
+                // Overlapping circles chain
+                SizedBox(
+                  height: 60,
+                  child: Center(
+                    child: SizedBox(
+                      width: (_members.length * 30.0) + 10,
+                      height: 56,
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        children: List.generate(_members.length, (index) {
+                          final m = _members[index];
+                          return Positioned(
+                            left: index * 30.0,
+                            child: GestureDetector(
+                              onTap: () { Navigator.pop(context); _showMemberProfileModal(m); },
+                              child: Container(
+                                width: 56, height: 56,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  border: Border.all(color: ThemeHelper.surface(context), width: 3),
+                                ),
+                                child: ClipOval(child: m.photo != null && m.photo!.isNotEmpty
+                                    ? Image.memory(m.photo!, width: 50, height: 50, fit: BoxFit.cover)
+                                    : Container(
+                                        width: 50, height: 50,
+                                        decoration: BoxDecoration(
+                                          gradient: LinearGradient(colors: [m.color, m.color.withOpacity(0.7)]),
+                                          shape: BoxShape.circle,
+                                        ),
+                                        child: Center(child: Text(m.initials, style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700))),
+                                      ),
+                                ),
+                              ),
+                            ),
+                          );
+                        }),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                // Name labels row
+                SizedBox(
+                  height: 20,
+                  child: Center(
+                    child: SizedBox(
+                      width: (_members.length * 30.0) + 10,
+                      child: Row(
+                        children: List.generate(_members.length, (index) {
+                          final m = _members[index];
+                          return SizedBox(
+                            width: 56,
+                            child: Center(child: Text(m.name.split(' ').first, style: TextStyle(fontSize: 8, color: ThemeHelper.textDim(context)), overflow: TextOverflow.ellipsis)),
+                          );
+                        }),
+                      ),
+                    ),
+                  ),
+                ),
                 const SizedBox(height: 16),
-                // Invite buttons row
-                Row(
-                  children: [
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () { Navigator.pop(context); _inviteMember(); },
-                        child: Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.1), borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.primary.withOpacity(0.3))),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
+                // Invite buttons
+                if (_userRole == 'admin' || _userRole == 'editor')
+                  Row(
+                    children: [
+                      Expanded(
+                        child: GestureDetector(
+                          onTap: () { Navigator.pop(context); _inviteMember(); },
+                          child: Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.1), borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.primary.withOpacity(0.3))),
+                            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
                               Icon(Icons.person_add, color: AppColors.primary, size: 18),
                               const SizedBox(width: 8),
                               Text('Email', style: TextStyle(fontSize: 13, color: AppColors.primary, fontWeight: FontWeight.w600)),
-                            ],
+                            ]),
                           ),
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () { Navigator.pop(context); _showQRCode(); },
-                        child: Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(color: AppColors.success.withOpacity(0.1), borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.success.withOpacity(0.3))),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: GestureDetector(
+                          onTap: () { Navigator.pop(context); _showQRCode(); },
+                          child: Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(color: AppColors.success.withOpacity(0.1), borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.success.withOpacity(0.3))),
+                            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
                               Icon(Icons.qr_code, color: AppColors.success, size: 18),
                               const SizedBox(width: 8),
                               Text('QR Code', style: TextStyle(fontSize: 13, color: AppColors.success, fontWeight: FontWeight.w600)),
-                            ],
+                            ]),
                           ),
                         ),
                       ),
-                    ),
-                  ],
-                ),
+                    ],
+                  ),
                 const SizedBox(height: 16),
                 // Members list
                 Flexible(
@@ -478,42 +610,24 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                     itemCount: _members.length,
                     itemBuilder: (context, index) {
                       final m = _members[index];
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: Row(
-                          children: [
-                            Container(
-                              width: 40, height: 40,
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(colors: [m.color, m.color.withOpacity(0.7)]),
-                                borderRadius: BorderRadius.circular(50),
-                              ),
-                              child: Center(child: Text(m.initials, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700))),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(m.name, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: ThemeHelper.text(context))),
-                                  Text(m.isBot ? 'Bot' : (m.isOnline ? 'En ligne' : 'Hors ligne'), style: TextStyle(fontSize: 12, color: m.isOnline ? AppColors.success : ThemeHelper.textDim(context))),
-                                ],
-                              ),
-                            ),
-                            if (!m.isBot)
-                              GestureDetector(
-                                onTap: () {
-                                  setState(() => _members.remove(m));
-                                  Navigator.pop(context);
-                                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${m.name} retiré du projet'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
-                                },
-                                child: Container(
-                                  padding: const EdgeInsets.all(6),
-                                  decoration: BoxDecoration(color: AppColors.error.withOpacity(0.1), borderRadius: BorderRadius.circular(8)),
-                                  child: Icon(Icons.person_remove, color: AppColors.error, size: 16),
-                                ),
-                              ),
-                          ],
+                      return Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          onTap: () { Navigator.pop(context); _showMemberProfileModal(m); },
+                          borderRadius: BorderRadius.circular(12),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+                            child: Row(children: [
+                              _buildAvatar(m, size: 40),
+                              const SizedBox(width: 12),
+                              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                Text(m.name, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: ThemeHelper.text(context))),
+                                Text(m.isBot ? 'Bot' : (m.role ?? 'Membre'), style: TextStyle(fontSize: 12, color: m.isOnline ? AppColors.success : ThemeHelper.textDim(context))),
+                              ])),
+                              if (m.isOnline)
+                                Container(width: 8, height: 8, decoration: BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
+                            ]),
+                          ),
                         ),
                       );
                     },
@@ -526,7 +640,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                     width: double.infinity,
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(12)),
-                          child: Center(child: Text('Fermer', style: TextStyle(color: ThemeHelper.textDim(context), fontSize: 14))),
+                    child: Center(child: Text('Fermer', style: TextStyle(color: ThemeHelper.textDim(context), fontSize: 14))),
                   ),
                 ),
                 SizedBox(height: MediaQuery.of(context).padding.bottom + 16),
@@ -535,6 +649,173 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
           ),
         ),
       ),
+    );
+  }
+
+  void _showMemberProfileModal(_Member member) {
+    final surfaceColor = ThemeHelper.surface(context);
+    final borderColor = ThemeHelper.borderLight(context);
+    final textColor = ThemeHelper.text(context);
+    final textDimColor = ThemeHelper.textDim(context);
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'dismiss',
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 250),
+      transitionBuilder: (ctx, a1, a2, child) => FadeTransition(opacity: a1, child: ScaleTransition(scale: CurvedAnimation(parent: a1, curve: Curves.easeOutBack), child: child)),
+      pageBuilder: (ctx, a1, a2) {
+        return Stack(children: [
+          GestureDetector(onTap: () => Navigator.pop(ctx), child: ClipRect(child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12), child: Container(color: Colors.black.withOpacity(0.4))))),
+          Center(child: Material(color: Colors.transparent, child: Container(
+            width: MediaQuery.of(context).size.width * 0.8,
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(color: surfaceColor.withOpacity(0.95), borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 20, offset: const Offset(0, 8))]),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              _buildAvatar(member, size: 80),
+              const SizedBox(height: 16),
+              Text(member.name, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
+              const SizedBox(height: 4),
+              if (member.email != null && member.email!.isNotEmpty)
+                Text(member.email!, style: TextStyle(fontSize: 13, color: textDimColor)),
+              const SizedBox(height: 12),
+              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(color: member.color.withOpacity(0.1), borderRadius: BorderRadius.circular(8)),
+                  child: Text((member.role ?? 'Membre').toUpperCase(), style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: member.color)),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(color: member.isOnline ? AppColors.success.withOpacity(0.1) : Colors.grey.withOpacity(0.1), borderRadius: BorderRadius.circular(8)),
+                  child: Text(member.isOnline ? 'En ligne' : 'Hors ligne', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: member.isOnline ? AppColors.success : Colors.grey)),
+                ),
+              ]),
+              if (member.isBot) ...[
+                const SizedBox(height: 16),
+                GestureDetector(
+                  onTap: () { Navigator.pop(ctx); _showBotSettingsModal(); },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.1), borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.primary.withOpacity(0.3))),
+                    child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                      Icon(Icons.settings, size: 16, color: AppColors.primary),
+                      const SizedBox(width: 8),
+                      Text('Configurer le Bot', style: TextStyle(fontSize: 13, color: AppColors.primary, fontWeight: FontWeight.w600)),
+                    ]),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 16),
+              GestureDetector(onTap: () => Navigator.pop(ctx), child: Container(
+                width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 12),
+                decoration: BoxDecoration(color: ThemeHelper.bg(ctx), borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)),
+                child: Center(child: Text('Fermer', style: TextStyle(color: textDimColor, fontSize: 14))),
+              )),
+            ]),
+          ))),
+        ]);
+      },
+    );
+  }
+
+  void _showBotSettingsModal() async {
+    final currentName = await _getBotName();
+    final nameController = TextEditingController(text: currentName);
+    final surfaceColor = ThemeHelper.surface(context);
+    final borderColor = ThemeHelper.borderLight(context);
+    final textColor = ThemeHelper.text(context);
+    final textDimColor = ThemeHelper.textDim(context);
+    Uint8List? selectedPhoto;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getString('bot_photo_${widget.projectId}');
+      if (saved != null && saved.isNotEmpty) selectedPhoto = base64Decode(saved);
+    } catch (_) {}
+
+    if (!mounted) return;
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'dismiss',
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 250),
+      transitionBuilder: (ctx, a1, a2, child) => FadeTransition(opacity: a1, child: ScaleTransition(scale: CurvedAnimation(parent: a1, curve: Curves.easeOutBack), child: child)),
+      pageBuilder: (ctx, a1, a2) {
+        return StatefulBuilder(
+          builder: (ctx, setModalState) => Stack(children: [
+            GestureDetector(onTap: () => Navigator.pop(ctx), child: ClipRect(child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12), child: Container(color: Colors.black.withOpacity(0.4))))),
+            Center(child: Material(color: Colors.transparent, child: Container(
+              width: MediaQuery.of(context).size.width * 0.85,
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(color: surfaceColor.withOpacity(0.95), borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 20, offset: const Offset(0, 8))]),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Text('Paramètres du Bot', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
+                const SizedBox(height: 20),
+                // Bot photo
+                GestureDetector(
+                  onTap: () async {
+                    final picker = PhotoPickerHelper();
+                    final bytes = await picker.pickImage();
+                    if (bytes != null) setModalState(() => selectedPhoto = Uint8List.fromList(bytes));
+                  },
+                  child: Container(
+                    width: 80, height: 80,
+                    decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: borderColor, width: 2)),
+                    child: ClipOval(child: selectedPhoto != null
+                        ? Image.memory(selectedPhoto!, width: 80, height: 80, fit: BoxFit.cover)
+                        : Container(
+                            width: 80, height: 80,
+                            decoration: const BoxDecoration(shape: BoxShape.circle, gradient: LinearGradient(colors: [Color(0xFF55EFC4), Color(0xFF00B894)])),
+                            child: const Center(child: Text('BOT', style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w700))),
+                          ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text('Appuyez pour changer la photo', style: TextStyle(fontSize: 11, color: textDimColor)),
+                const SizedBox(height: 20),
+                // Bot name
+                TextField(
+                  controller: nameController,
+                  style: TextStyle(fontSize: 14, color: textColor),
+                  decoration: InputDecoration(
+                    labelText: 'Nom du bot',
+                    labelStyle: TextStyle(color: textDimColor),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: borderColor)),
+                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: AppColors.primary)),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Row(children: [
+                  Expanded(child: GestureDetector(onTap: () => Navigator.pop(ctx), child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    decoration: BoxDecoration(borderRadius: BorderRadius.circular(10), border: Border.all(color: borderColor)),
+                    child: Center(child: Text('Annuler', style: TextStyle(color: textDimColor, fontSize: 14))),
+                  ))),
+                  const SizedBox(width: 12),
+                  Expanded(child: GestureDetector(onTap: () async {
+                    final prefs = await SharedPreferences.getInstance();
+                    await prefs.setString('bot_name_${widget.projectId}', nameController.text.trim());
+                    if (selectedPhoto != null) {
+                      await prefs.setString('bot_photo_${widget.projectId}', base64Encode(selectedPhoto!));
+                    }
+                    if (!mounted) return;
+                    Navigator.pop(ctx);
+                    _loadProjectData();
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Bot mis à jour'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                  }, child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(10)),
+                    child: const Center(child: Text('Sauvegarder', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600))),
+                  ))),
+                ]),
+              ]),
+            ))),
+          ]),
+        );
+      },
     );
   }
 
@@ -851,73 +1132,150 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     final isCurrentUser = msg.sender == _currentUser;
     final msgIndex = _messages.indexOf(msg);
 
-    return GestureDetector(
-      onLongPressStart: _userRole == 'viewer' ? null : (details) {
-        setState(() => _selectedMessageIndex = msgIndex);
-        _showMessageOptions(msg, details.globalPosition);
+    return Dismissible(
+      key: ValueKey('msg_$msgIndex'),
+      direction: _userRole == 'viewer' ? DismissDirection.none : DismissDirection.startToEnd,
+      confirmDismiss: (_) async {
+        _showCommentDialog(msg);
+        return false;
       },
-      child: AnimatedScale(
-        scale: _selectedMessageIndex == msgIndex ? 1.05 : 1.0,
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeOut,
-        child: Padding(
-          padding: const EdgeInsets.only(bottom: 16),
-          child: Row(
-            mainAxisAlignment: isCurrentUser ? MainAxisAlignment.end : MainAxisAlignment.start,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (!isCurrentUser) ...[
-                Container(
-                  width: 36, height: 36,
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(colors: [msg.sender.color, msg.sender.color.withOpacity(0.7)]),
-                    borderRadius: BorderRadius.circular(50),
-                    border: Border.all(color: ThemeHelper.bg(context), width: 2),
-                  ),
-                  child: Center(child: Text(msg.sender.initials, style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w700))),
-                ),
-                const SizedBox(width: 10),
-              ],
-              Flexible(
-                child: Column(
-                  crossAxisAlignment: isCurrentUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-                  children: [
-                    if (!isCurrentUser)
-                      Padding(padding: const EdgeInsets.only(bottom: 4), child: Text(msg.sender.name, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: msg.sender.color))),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: _selectedMessageIndex == msgIndex
-                            ? AppColors.primary.withOpacity(0.08)
-                            : isCurrentUser ? AppColors.primary.withOpacity(0.15) : ThemeHelper.surface(context),
-                        borderRadius: BorderRadius.only(topLeft: const Radius.circular(16), topRight: const Radius.circular(16), bottomLeft: Radius.circular(isCurrentUser ? 16 : 4), bottomRight: Radius.circular(isCurrentUser ? 4 : 16)),
-                        border: Border.all(color: _selectedMessageIndex == msgIndex
-                            ? AppColors.primary.withOpacity(0.5)
-                            : isCurrentUser ? AppColors.primary.withOpacity(0.3) : ThemeHelper.borderLight(context)),
+      background: Container(
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.only(left: 20),
+        margin: const EdgeInsets.only(bottom: 16),
+        decoration: BoxDecoration(
+          color: AppColors.success.withOpacity(0.15),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+          SvgPicture.asset('assets/icons/edit.svg', width: 20, height: 20, colorFilter: ColorFilter.mode(AppColors.success, BlendMode.srcIn)),
+          const SizedBox(height: 4),
+          Text('Commenter', style: TextStyle(fontSize: 11, color: AppColors.success, fontWeight: FontWeight.w600)),
+        ]),
+      ),
+      child: GestureDetector(
+        onLongPressStart: _userRole == 'viewer' ? null : (details) {
+          setState(() => _selectedMessageIndex = msgIndex);
+          _showMessageOptions(msg, details.globalPosition);
+        },
+        child: AnimatedScale(
+          scale: _selectedMessageIndex == msgIndex ? 1.05 : 1.0,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+          child: Padding(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: Row(
+              mainAxisAlignment: isCurrentUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (!isCurrentUser) ...[
+                  Column(children: [
+                    _buildAvatar(msg.sender, size: 36),
+                    const SizedBox(height: 2),
+                    Text(msg.sender.name.split(' ').first, style: TextStyle(fontSize: 9, color: ThemeHelper.textDim(context), fontWeight: FontWeight.w500), overflow: TextOverflow.ellipsis),
+                  ]),
+                  const SizedBox(width: 10),
+                ],
+                Flexible(
+                  child: Column(
+                    crossAxisAlignment: isCurrentUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: _selectedMessageIndex == msgIndex
+                              ? AppColors.primary.withOpacity(0.08)
+                              : isCurrentUser ? AppColors.primary.withOpacity(0.15) : ThemeHelper.surface(context),
+                          borderRadius: BorderRadius.only(topLeft: const Radius.circular(16), topRight: const Radius.circular(16), bottomLeft: Radius.circular(isCurrentUser ? 16 : 4), bottomRight: Radius.circular(isCurrentUser ? 4 : 16)),
+                          border: Border.all(color: _selectedMessageIndex == msgIndex
+                              ? AppColors.primary.withOpacity(0.5)
+                              : isCurrentUser ? AppColors.primary.withOpacity(0.3) : ThemeHelper.borderLight(context)),
+                        ),
+                        child: _buildMessageText(msg.text, isBot),
                       ),
-                      child: _buildMessageText(msg.text, isBot),
-                    ),
-                    const SizedBox(height: 4),
-                    Text('${msg.timestamp.hour}:${msg.timestamp.minute.toString().padLeft(2, '0')}', style: TextStyle(fontSize: 11, color: ThemeHelper.textDim(context))),
-                  ],
-                ),
-              ),
-              if (isCurrentUser) ...[
-                const SizedBox(width: 10),
-                Container(
-                  width: 36, height: 36,
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(colors: [msg.sender.color, msg.sender.color.withOpacity(0.7)]),
-                    borderRadius: BorderRadius.circular(50),
-                    border: Border.all(color: ThemeHelper.bg(context), width: 2),
+                      const SizedBox(height: 4),
+                      Text('${msg.timestamp.hour}:${msg.timestamp.minute.toString().padLeft(2, '0')}', style: TextStyle(fontSize: 11, color: ThemeHelper.textDim(context))),
+                    ],
                   ),
-                  child: Center(child: Text(msg.sender.initials, style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w700))),
                 ),
+                if (isCurrentUser) ...[
+                  const SizedBox(width: 10),
+                  Column(children: [
+                    _buildAvatar(msg.sender, size: 36),
+                    const SizedBox(height: 2),
+                    Text(msg.sender.name.split(' ').first, style: TextStyle(fontSize: 9, color: ThemeHelper.textDim(context), fontWeight: FontWeight.w500), overflow: TextOverflow.ellipsis),
+                  ]),
+                ],
               ],
-            ],
+            ),
           ),
         ),
       ),
+    );
+  }
+
+  void _showCommentDialog(_ChatMessage msg) {
+    final commentController = TextEditingController();
+    final surfaceColor = ThemeHelper.surface(context);
+    final borderColor = ThemeHelper.borderLight(context);
+    final textColor = ThemeHelper.text(context);
+    final textDimColor = ThemeHelper.textDim(context);
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'dismiss',
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 250),
+      transitionBuilder: (ctx, a1, a2, child) => FadeTransition(opacity: a1, child: ScaleTransition(scale: CurvedAnimation(parent: a1, curve: Curves.easeOutBack), child: child)),
+      pageBuilder: (ctx, a1, a2) {
+        return Stack(children: [
+          GestureDetector(onTap: () => Navigator.pop(ctx), child: ClipRect(child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12), child: Container(color: Colors.black.withOpacity(0.4))))),
+          Center(child: Material(color: Colors.transparent, child: Container(
+            width: MediaQuery.of(context).size.width * 0.85,
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(color: surfaceColor.withOpacity(0.95), borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 20, offset: const Offset(0, 8))]),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                SvgPicture.asset('assets/icons/edit.svg', width: 18, height: 18, colorFilter: ColorFilter.mode(AppColors.primary, BlendMode.srcIn)),
+                const SizedBox(width: 8),
+                Text('Commenter le message', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: textColor)),
+              ]),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(color: ThemeHelper.bg(ctx), borderRadius: BorderRadius.circular(10)),
+                child: Text(msg.text, style: TextStyle(fontSize: 13, color: textDimColor), maxLines: 3, overflow: TextOverflow.ellipsis),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: commentController,
+                maxLines: 3,
+                style: TextStyle(fontSize: 14, color: textColor),
+                decoration: InputDecoration(hintText: 'Votre commentaire...', hintStyle: TextStyle(color: textDimColor), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: borderColor)), focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: AppColors.primary))),
+              ),
+              const SizedBox(height: 16),
+              Row(children: [
+                Expanded(child: GestureDetector(onTap: () => Navigator.pop(ctx), child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  decoration: BoxDecoration(borderRadius: BorderRadius.circular(10), border: Border.all(color: borderColor)),
+                  child: Center(child: Text('Annuler', style: TextStyle(color: textDimColor, fontSize: 14))),
+                ))),
+                const SizedBox(width: 12),
+                Expanded(child: GestureDetector(onTap: () {
+                  if (commentController.text.trim().isNotEmpty) {
+                    Navigator.pop(ctx);
+                    _sendCommand('/comment ${msg.text.substring(0, msg.text.length.clamp(0, 20))} → ${commentController.text}');
+                  }
+                }, child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(10)),
+                  child: const Center(child: Text('Envoyer', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600))),
+                ))),
+              ]),
+            ]),
+          ))),
+        ]);
+      },
     );
   }
 
@@ -1103,7 +1461,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Row(children: [
-        CircleAvatar(radius: 12, backgroundColor: member.color, child: Text(member.initials, style: const TextStyle(fontSize: 10, color: Colors.white))),
+        _buildAvatar(member, size: 24),
         const SizedBox(width: 10),
         Expanded(child: Text('${member.name} a été notifié', style: const TextStyle(color: Colors.white))),
       ]),
@@ -1112,6 +1470,20 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       behavior: SnackBarBehavior.floating,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
     ));
+  }
+
+  String _getMentionQuery() {
+    final text = _controller.text;
+    final match = RegExp(r'@(\w*)$').firstMatch(text);
+    return match?.group(1)?.toLowerCase() ?? '';
+  }
+
+  void _selectMention(_Member member) {
+    final text = _controller.text;
+    final newText = text.replaceFirst(RegExp(r'@\w*$'), '@${member.name} ');
+    _controller.text = newText;
+    _controller.selection = TextSelection.fromPosition(TextPosition(offset: newText.length));
+    setState(() => _isMentioning = false);
   }
 
   String _formatJsonList(List data) {
@@ -1152,6 +1524,27 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       }
     }
     return buf.toString();
+  }
+
+  Future<String> _getBotName() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getString('bot_name_${widget.projectId}') ?? 'Bot';
+    } catch (_) { return 'Bot'; }
+  }
+
+  Widget _buildAvatar(_Member m, {double size = 40}) {
+    if (m.photo != null && m.photo!.isNotEmpty) {
+      return ClipOval(child: Image.memory(m.photo!, width: size, height: size, fit: BoxFit.cover));
+    }
+    return Container(
+      width: size, height: size,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(colors: [m.color, m.color.withOpacity(0.7)]),
+        shape: BoxShape.circle,
+      ),
+      child: Center(child: Text(m.initials, style: TextStyle(color: Colors.white, fontSize: size * 0.3, fontWeight: FontWeight.w700))),
+    );
   }
 
   Future<String> _checkBackendStatus() async {
@@ -1206,7 +1599,10 @@ class _Member {
   final Color color;
   final bool isOnline;
   final bool isBot;
-  _Member({required this.name, required this.initials, required this.color, this.isOnline = false, this.isBot = false});
+  final Uint8List? photo;
+  final String? role;
+  final String? email;
+  _Member({required this.name, required this.initials, required this.color, this.isOnline = false, this.isBot = false, this.photo, this.role, this.email});
 }
 
 class _ChatMessage {
