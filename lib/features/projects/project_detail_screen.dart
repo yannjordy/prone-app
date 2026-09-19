@@ -42,6 +42,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   String _backendType = 'generic';
   Uint8List? _projectImageBytes;
   String _userRole = 'admin';
+  bool _isMentioning = false;
 
   final List<_Member> _members = [
     _Member(name: 'Bot', initials: 'BOT', color: Color(0xFF55EFC4), isOnline: true, isBot: true),
@@ -53,6 +54,13 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   void initState() {
     super.initState();
     _currentUser = _Member(name: 'Vous', initials: 'VO', color: AppColors.primary, isOnline: true);
+    _controller.addListener(() {
+      final text = _controller.text;
+      final hasMention = text.contains(RegExp(r'@\w+\s*$'));
+      if (hasMention != _isMentioning) {
+        setState(() => _isMentioning = hasMention);
+      }
+    });
     _loadProjectData();
   }
 
@@ -326,7 +334,12 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                             itemCount: filteredCommands.length,
                             itemBuilder: (context, index) {
                               final cmd = filteredCommands[index];
-                              return _MenuBtn(icon: cmd.icon, label: '/${cmd.name}', description: cmd.description, onTap: () => _sendCommand('/${cmd.name}'));
+                              return _MenuBtn(icon: cmd.icon, label: '/${cmd.name}', description: cmd.description, onTap: () {
+                                _controller.text = '/${cmd.name} ';
+                                _controller.selection = TextSelection.fromPosition(TextPosition(offset: _controller.text.length));
+                                setState(() => _showCommands = false);
+                                FocusScope.of(context).requestFocus(FocusNode());
+                              });
                             },
                           ),
                         ),
@@ -367,8 +380,8 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                       Expanded(
                         child: TextField(
                           controller: _controller,
-                          style: TextStyle(fontSize: 14, color: ThemeHelper.text(context)),
-                          decoration: InputDecoration(hintText: '/help', border: InputBorder.none, hintStyle: TextStyle(color: ThemeHelper.textDim(context))),
+                          style: TextStyle(fontSize: 14, color: _isMentioning ? AppColors.success : ThemeHelper.text(context)),
+                          decoration: InputDecoration(hintText: '/help ou @nom', border: InputBorder.none, hintStyle: TextStyle(color: ThemeHelper.textDim(context))),
                           onSubmitted: (text) => _sendCommand(text),
                         ),
                       ),
@@ -811,6 +824,28 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     );
   }
 
+  Widget _buildMessageText(String text, bool isBot) {
+    final spans = <TextSpan>[];
+    final regex = RegExp(r'(@\w+)');
+    int lastEnd = 0;
+    for (final match in regex.allMatches(text)) {
+      if (match.start > lastEnd) {
+        spans.add(TextSpan(text: text.substring(lastEnd, match.start)));
+      }
+      spans.add(TextSpan(text: match.group(0), style: TextStyle(color: AppColors.success, fontWeight: FontWeight.w700)));
+      lastEnd = match.end;
+    }
+    if (lastEnd < text.length) {
+      spans.add(TextSpan(text: text.substring(lastEnd)));
+    }
+    return RichText(
+      text: TextSpan(
+        children: spans.isEmpty ? [TextSpan(text: text)] : spans,
+        style: TextStyle(fontSize: 14, color: ThemeHelper.text(context), height: 1.5, fontFamily: isBot ? 'monospace' : null),
+      ),
+    );
+  }
+
   Widget _buildMessage(_ChatMessage msg) {
     final isBot = msg.sender.isBot;
     final isCurrentUser = msg.sender == _currentUser;
@@ -860,7 +895,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                             ? AppColors.primary.withOpacity(0.5)
                             : isCurrentUser ? AppColors.primary.withOpacity(0.3) : ThemeHelper.borderLight(context)),
                       ),
-                      child: Text(msg.text, style: TextStyle(fontSize: 14, color: ThemeHelper.text(context), height: 1.5, fontFamily: isBot ? 'monospace' : null)),
+                      child: _buildMessageText(msg.text, isBot),
                     ),
                     const SizedBox(height: 4),
                     Text('${msg.timestamp.hour}:${msg.timestamp.minute.toString().padLeft(2, '0')}', style: TextStyle(fontSize: 11, color: ThemeHelper.textDim(context))),
@@ -1003,6 +1038,17 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
 
   void _sendCommand(String command) async {
     if (command.trim().isEmpty) return;
+
+    // Check for @ mentions
+    final mentionMatch = RegExp(r'@(\w+)').firstMatch(command);
+    if (mentionMatch != null) {
+      final mentionedName = mentionMatch.group(1);
+      final mentionedMember = _members.where((m) => m.name.toLowerCase() == mentionedName?.toLowerCase()).toList();
+      if (mentionedMember.isNotEmpty) {
+        _showMentionNotification(mentionedMember.first, command);
+      }
+    }
+
     setState(() {
       _showCommands = false;
       _messages.add(_ChatMessage(sender: _currentUser!, text: command, timestamp: DateTime.now()));
@@ -1017,45 +1063,30 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       return;
     }
 
-    // Slash commands (local only)
-    if (command.startsWith('/')) {
-      Future.delayed(const Duration(milliseconds: 800), () async {
-        if (!mounted) return;
-        String response;
-        final cmd = CommandLibrary.findCommand(command);
-        if (cmd != null) {
-          response = cmd.execute(cmd.currentParams);
-        } else {
-          final lower = command.toLowerCase();
-          if (lower == '/help' || lower == '/aide') {
-            response = '🤖 Commandes Prone:\n\n/status - Vérifier le backend\n/test - Tester la connexion\n/tables - Lister les tables\n/help - Aide\n\n💡 Commandes backend (requêtes HTTP):\nGET /produits - Lire des données\nPOST /produits - Créer une ressource\nPUT /produits?id=1 - Modifier\nDELETE /produits?id=1 - Supprimer\n\n📝 Requête Supabase:\nGET /produits?select=*&statut=eq.published\nGET /produits?select=nom,prix&limit=5';
-          } else if (lower == '/status' || lower == '/test') {
-            response = await _checkBackendStatus();
-          } else if (lower == '/tables') {
-            response = await _listTables();
-          } else {
-            response = '❌ Commande inconnue: "$command"\n\nTapez /help pour voir les commandes disponibles.';
-          }
-        }
-        _backend.sendMessage(widget.projectId, response, sender: 'bot').catchError((_) => <String, dynamic>{'error': true});
-        if (!mounted) return;
-        setState(() {
-          _isTyping = false;
-          _messages.add(_ChatMessage(sender: _members.first, text: response, timestamp: DateTime.now()));
-        });
-        if (_scrollController.hasClients) {
-          _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
-        }
-      });
+    // Only slash commands trigger the bot
+    if (!command.startsWith('/')) {
+      setState(() { _isTyping = false; });
       return;
     }
 
-    // Backend HTTP requests
-    final lower = command.toLowerCase().trim();
-
-    // Handle help keywords
-    if (lower.contains('help') || lower.contains('aide')) {
-      final response = '🤖 Commandes disponibles:\n/status - Vérifier le backend\n/test - Tester la connexion\n/tables - Lister les tables\n/help - Aide\n\n💡 Requêtes HTTP:\nGET /produits - Lire\nPOST /produits - Créer\nPUT /produits?id=1 - Modifier\nDELETE /produits?id=1 - Supprimer\n\n📝 Requête Supabase:\nGET /produits?select=*&statut=eq.published';
+    Future.delayed(const Duration(milliseconds: 800), () async {
+      if (!mounted) return;
+      String response;
+      final cmd = CommandLibrary.findCommand(command);
+      if (cmd != null) {
+        response = cmd.execute(cmd.currentParams);
+      } else {
+        final lower = command.toLowerCase();
+        if (lower == '/help' || lower == '/aide') {
+          response = '🤖 Commandes Prone:\n\n/status - Vérifier le backend\n/test - Tester la connexion\n/tables - Lister les tables\n/help - Aide\n\n💡 Commandes backend (requêtes HTTP):\nGET /produits - Lire des données\nPOST /produits - Créer une ressource\nPUT /produits?id=1 - Modifier\nDELETE /produits?id=1 - Supprimer\n\n📝 Requête Supabase:\nGET /produits?select=*&statut=eq.published\nGET /produits?select=nom,prix&limit=5';
+        } else if (lower == '/status' || lower == '/test') {
+          response = await _checkBackendStatus();
+        } else if (lower == '/tables') {
+          response = await _listTables();
+        } else {
+          response = '❌ Commande inconnue: "$command"\n\nTapez /help pour voir les commandes disponibles.';
+        }
+      }
       _backend.sendMessage(widget.projectId, response, sender: 'bot').catchError((_) => <String, dynamic>{'error': true});
       if (!mounted) return;
       setState(() {
@@ -1065,153 +1096,22 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       if (_scrollController.hasClients) {
         _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
       }
-      return;
-    }
-
-    // Parse HTTP request: METHOD /path?params
-    String method = 'GET';
-    String path = command.trim();
-    Map<String, dynamic>? body;
-
-    final upper = command.toUpperCase().trim();
-    if (upper.startsWith('GET ') || upper.startsWith('POST ') || upper.startsWith('PUT ') || upper.startsWith('DELETE ') || upper.startsWith('PATCH ')) {
-      final parts = command.trim().split(RegExp(r'\s+'));
-      method = parts[0].toUpperCase();
-      path = parts.length > 1 ? parts[1] : '/';
-      if (parts.length > 2) {
-        try {
-          body = Map<String, dynamic>.from(_parseJsonOrQuery(parts.sublist(2).join(' ')));
-        } catch (_) {}
-      }
-    } else if (command.startsWith('{') || command.startsWith('[')) {
-      method = 'POST';
-      path = '/';
-      try {
-        body = Map<String, dynamic>.from(_parseJsonOrQuery(command));
-      } catch (_) {}
-    }
-
-    if (_backendUrl.isEmpty) {
-      final response = '⚠️ Aucun backend configuré.\n\nAllez dans les paramètres du projet ou créez un projet avec une URL de backend.\n\nExemple: https://xjckbqbqxcwzcrlmuvzf.supabase.co';
-      _backend.sendMessage(widget.projectId, response, sender: 'bot').catchError((_) => <String, dynamic>{'error': true});
-      if (!mounted) return;
-      setState(() {
-        _isTyping = false;
-        _messages.add(_ChatMessage(sender: _members.first, text: response, timestamp: DateTime.now()));
-      });
-      return;
-    }
-
-    // Execute HTTP request
-    _executeHttpRequest(method, path, body, command);
+    });
   }
 
-  dynamic _parseJsonOrQuery(String text) {
-    text = text.trim();
-    if (text.startsWith('{') || text.startsWith('[')) {
-      return text; // raw JSON
-    }
-    // Parse query params like name=foo&price=100
-    final params = <String, dynamic>{};
-    for (final part in text.split('&')) {
-      final kv = part.split('=');
-      if (kv.length == 2) {
-        params[kv[0]] = kv[1];
-      }
-    }
-    return params;
-  }
-
-  Future<void> _executeHttpRequest(String method, String path, Map<String, dynamic>? body, String rawCommand) async {
-    try {
-      final dio = Dio();
-      String baseUrl = _backendUrl.replaceAll(RegExp(r'/+$'), '');
-
-      // Supabase REST API (PostgREST)
-      if (_backendType == 'supabase') {
-        if (!path.startsWith('/')) path = '/$path';
-        // Supabase uses /rest/v1/ prefix
-        if (!path.contains('/rest/v1')) {
-          path = '/rest/v1$path';
-        }
-      }
-
-      final url = '$baseUrl$path';
-      final headers = <String, dynamic>{'Content-Type': 'application/json'};
-
-      if (_backendType == 'supabase' && _projectApiKey.isNotEmpty) {
-        headers['apikey'] = _projectApiKey;
-        headers['Authorization'] = 'Bearer $_projectApiKey';
-        headers['Prefer'] = 'return=representation';
-      } else if (_projectApiKey.isNotEmpty) {
-        headers['Authorization'] = 'Bearer $_projectApiKey';
-      }
-
-      final response = await dio.request(
-        url,
-        options: Options(method: method, headers: headers, receiveTimeout: const Duration(seconds: 15)),
-        data: body,
-      );
-
-      final data = response.data;
-      String responseText;
-
-      if (data is List) {
-        final count = data.length;
-        if (count == 0) {
-          responseText = '📭 Résultat: Aucune donnée trouvée.';
-        } else if (count <= 10) {
-          responseText = '✅ $method $path → ${response.statusCode}\n\n📦 $count résultat(s):\n${_formatJsonList(data)}';
-        } else {
-          responseText = '✅ $method $path → ${response.statusCode}\n\n📦 $count résultat(s) (affichage des 10 premiers):\n${_formatJsonList(data.sublist(0, 10))}';
-        }
-      } else if (data is Map) {
-        responseText = '✅ $method $path → ${response.statusCode}\n\n📦 Résultat:\n${_formatJsonMap(data)}';
-      } else {
-        responseText = '✅ $method $path → ${response.statusCode}\n\n$data';
-      }
-
-      _backend.sendMessage(widget.projectId, responseText, sender: 'bot').catchError((_) => <String, dynamic>{'error': true});
-      if (!mounted) return;
-      setState(() {
-        _isTyping = false;
-        _messages.add(_ChatMessage(sender: _members.first, text: responseText, timestamp: DateTime.now()));
-      });
-    } on DioException catch (e) {
-      String errorMsg = '❌ Erreur $method $path\n\n';
-      if (e.response != null) {
-        errorMsg += 'Status: ${e.response?.statusCode}\n';
-        final data = e.response?.data;
-        if (data is Map) {
-          errorMsg += '${data['message'] ?? data['error'] ?? data}';
-        } else {
-          errorMsg += '$data';
-        }
-      } else if (e.type == DioExceptionType.connectionTimeout || e.type == DioExceptionType.sendTimeout) {
-        errorMsg += '⏱️ Timeout - Le backend ne répond pas.';
-      } else if (e.type == DioExceptionType.connectionError) {
-        errorMsg += '🔌 Impossible de se connecter au backend.\nVérifiez l\'URL et la connexion internet.';
-      } else {
-        errorMsg += '${e.message}';
-      }
-      _backend.sendMessage(widget.projectId, errorMsg, sender: 'bot').catchError((_) => <String, dynamic>{'error': true});
-      if (!mounted) return;
-      setState(() {
-        _isTyping = false;
-        _messages.add(_ChatMessage(sender: _members.first, text: errorMsg, timestamp: DateTime.now()));
-      });
-    } catch (e) {
-      final errorMsg = '❌ Erreur inattendue: $e';
-      _backend.sendMessage(widget.projectId, errorMsg, sender: 'bot').catchError((_) => <String, dynamic>{'error': true});
-      if (!mounted) return;
-      setState(() {
-        _isTyping = false;
-        _messages.add(_ChatMessage(sender: _members.first, text: errorMsg, timestamp: DateTime.now()));
-      });
-    }
-    if (_scrollController.hasClients) {
-      _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
-    }
+  void _showMentionNotification(_Member member, String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Row(children: [
+        CircleAvatar(radius: 12, backgroundColor: member.color, child: Text(member.initials, style: const TextStyle(fontSize: 10, color: Colors.white))),
+        const SizedBox(width: 10),
+        Expanded(child: Text('${member.name} a été notifié', style: const TextStyle(color: Colors.white))),
+      ]),
+      backgroundColor: AppColors.primary,
+      duration: const Duration(seconds: 2),
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    ));
   }
 
   String _formatJsonList(List data) {
