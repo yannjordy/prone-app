@@ -1515,6 +1515,143 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     );
   }
 
+  Future<String> _executeRealCommand(String command) async {
+    if (_backendUrl.isEmpty) return '⚠️ Aucun backend configuré.';
+    final parts = command.trim().split(RegExp(r'\s+'));
+    final cmd = parts[0].toLowerCase().replaceFirst('/', '');
+    final args = parts.sublist(1);
+
+    try {
+      if (cmd == 'users') {
+        return await _fetchTable('users', limit: 50);
+      } else if (cmd == 'products' || cmd == 'produits') {
+        return await _fetchTable(args.isNotEmpty ? args[0] : 'products', limit: 50);
+      } else if (cmd == 'orders' || cmd == 'commandes') {
+        return await _fetchTable(args.isNotEmpty ? args[0] : 'orders', limit: 50);
+      } else if (cmd == 'count') {
+        if (args.isEmpty) return '❌ Usage: /count <table>';
+        return await _fetchTable(args[0], limit: 1000, countOnly: true);
+      } else if (cmd == 'last') {
+        if (args.isEmpty) return '❌ Usage: /last <table> [limit]';
+        final limit = args.length > 1 ? int.tryParse(args[1]) ?? 5 : 5;
+        return await _fetchTable(args[0], limit: limit);
+      } else if (cmd == 'search') {
+        if (args.length < 3) return '❌ Usage: /search <table> <field> <value>';
+        return await _searchTable(args[0], args[1], args.sublist(2).join(' '));
+      } else if (cmd == 'schema') {
+        if (args.isEmpty) return '❌ Usage: /schema <table>';
+        return await _fetchSchema(args[0]);
+      }
+      return '❌ Commande inconnue: "$command"';
+    } catch (e) {
+      return '❌ Erreur backend: $e';
+    }
+  }
+
+  Future<String> _fetchTable(String table, {int limit = 50, bool countOnly = false}) async {
+    final clean = _backendUrl.replaceAll(RegExp(r'/+$'), '');
+    String url;
+    Map<String, String> headers;
+
+    if (_backendType == 'supabase') {
+      url = '$clean/rest/v1/$table?select=*&limit=$limit';
+      headers = {'apikey': _projectApiKey, 'Authorization': 'Bearer $_projectApiKey'};
+    } else {
+      url = '$clean/$table';
+      headers = {};
+      if (_projectApiKey.isNotEmpty) headers['Authorization'] = 'Bearer $_projectApiKey';
+      headers['Content-Type'] = 'application/json';
+    }
+
+    final dio = Dio();
+    final resp = await dio.get(url,
+      options: Options(headers: headers, receiveTimeout: const Duration(seconds: 10), validateStatus: (s) => s != null && s < 500),
+    );
+
+    if (resp.statusCode != 200) {
+      return '❌ Erreur ${resp.statusCode} sur $table\n\nLe serveur a retourné: ${resp.statusCode}';
+    }
+
+    final data = resp.data;
+    if (data is List) {
+      if (countOnly) return '🔢 Nombre de lignes dans "$table": **${data.length}**';
+      if (data.isEmpty) return 'ℹ️ Table "$table" vide.';
+      final buf = StringBuffer('📋 **$table** (${data.length} entrées):\n\n');
+      for (var i = 0; i < data.length && i < limit; i++) {
+        final item = data[i];
+        if (item is Map) {
+          buf.writeln(_formatJsonList([item]));
+          buf.writeln();
+        }
+      }
+      return buf.toString();
+    } else if (data is Map) {
+      if (countOnly) return '🔢 Table "$table": réponse non listée';
+      return '📋 **$table**:\n\n${_formatJsonMap(data)}';
+    }
+    return 'ℹ️ Réponse inattendue de $table';
+  }
+
+  Future<String> _searchTable(String table, String field, String value) async {
+    final clean = _backendUrl.replaceAll(RegExp(r'/+$'), '');
+    String url;
+    Map<String, String> headers;
+
+    if (_backendType == 'supabase') {
+      url = '$clean/rest/v1/$table?$field=eq.$value&select=*';
+      headers = {'apikey': _projectApiKey, 'Authorization': 'Bearer $_projectApiKey'};
+    } else {
+      url = '$clean/$table?$field=$value';
+      headers = {};
+      if (_projectApiKey.isNotEmpty) headers['Authorization'] = 'Bearer $_projectApiKey';
+    }
+
+    final dio = Dio();
+    final resp = await dio.get(url,
+      options: Options(headers: headers, receiveTimeout: const Duration(seconds: 10), validateStatus: (s) => s != null && s < 500),
+    );
+
+    if (resp.statusCode != 200) return '❌ Erreur ${resp.statusCode}';
+    final data = resp.data;
+    if (data is List && data.isNotEmpty) {
+      final buf = StringBuffer('🔍 Résultats pour $field="$value" dans $table (${data.length}):\n\n');
+      for (final item in data) {
+        if (item is Map) buf.writeln(_formatJsonList([item]));
+        buf.writeln();
+      }
+      return buf.toString();
+    } else if (data is List && data.isEmpty) {
+      return '🔍 Aucun résultat pour $field="$value" dans $table';
+    }
+    return '🔍 Réponse: $data';
+  }
+
+  Future<String> _fetchSchema(String table) async {
+    final clean = _backendUrl.replaceAll(RegExp(r'/+$'), '');
+    if (_backendType == 'supabase') {
+      // Supabase: fetch one row to infer schema
+      final url = '$clean/rest/v1/$table?select=*&limit=1';
+      final headers = {'apikey': _projectApiKey, 'Authorization': 'Bearer $_projectApiKey'};
+      final dio = Dio();
+      final resp = await dio.get(url, options: Options(headers: headers, receiveTimeout: const Duration(seconds: 10)));
+      if (resp.statusCode == 200 && resp.data is List && (resp.data as List).isNotEmpty) {
+        final row = (resp.data as List).first as Map;
+        final buf = StringBuffer('📐 Structure de la table "$table":\n\n');
+        buf.writeln('╔════════════════╦════════════════╗');
+        buf.writeln('║    Colonne     ║     Type       ║');
+        buf.writeln('╠════════════════╬════════════════╣');
+        for (final entry in row.entries) {
+          final type = entry.value.runtimeType.toString();
+          buf.writeln('║ ${entry.key.padRight(14)} ║ ${type.padRight(14)} ║');
+        }
+        buf.writeln('╚════════════════╩════════════════╝');
+        return buf.toString();
+      }
+      return '❌ Impossible de récupérer le schéma de "$table"';
+    }
+    return '⚠️ Schéma non supporté pour ce type de backend';
+  }
+
   void _sendCommand(String command) async {
     if (command.trim().isEmpty) return;
 
@@ -1551,19 +1688,28 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     Future.delayed(const Duration(milliseconds: 800), () async {
       if (!mounted) return;
       String response;
-      final cmd = CommandLibrary.findCommand(command);
-      if (cmd != null) {
-        response = cmd.execute(cmd.currentParams);
+      final lower = command.toLowerCase().trim();
+
+      // Commands that query the REAL backend
+      final realCommands = ['/users', '/products', '/produits', '/orders', '/commandes',
+        '/count', '/last', '/search', '/schema', '/table'];
+      final matchesReal = realCommands.any((c) => lower.startsWith(c));
+
+      if (matchesReal && _backendUrl.isNotEmpty) {
+        response = await _executeRealCommand(command);
+      } else if (lower == '/help' || lower == '/aide') {
+        response = '🤖 Commandes Prone:\n\n/status - Vérifier le backend\n/test - Tester la connexion\n/tables - Lister les tables\n/users - Utilisateurs réels\n/products - Produits réels\n/count <table> - Compter\n/last <table> [n] - Dernières lignes\n/search <table> <champ> <valeur> - Rechercher\n/schema <table> - Structure\n/protect - Rapport sécurité\n/help - Aide';
+      } else if (lower == '/status' || lower == '/test') {
+        response = await _checkBackendStatus();
+      } else if (lower == '/tables') {
+        response = await _listTables();
+      } else if (lower == '/protect') {
+        response = _protector.getStatusReport();
       } else {
-        final lower = command.toLowerCase();
-        if (lower == '/help' || lower == '/aide') {
-          response = '🤖 Commandes Prone:\n\n/status - Vérifier le backend\n/test - Tester la connexion\n/tables - Lister les tables\n/protect - Rapport sécurité\n/help - Aide\n\n💡 Commandes backend:\nGET /produits - Lire\nPOST /produits - Créer\nPUT /produits?id=1 - Modifier\nDELETE /produits?id=1 - Supprimer';
-        } else if (lower == '/status' || lower == '/test') {
-          response = await _checkBackendStatus();
-        } else if (lower == '/tables') {
-          response = await _listTables();
-        } else if (lower == '/protect') {
-          response = _protector.getStatusReport();
+        // Try command library for system/mock commands
+        final cmd = CommandLibrary.findCommand(command);
+        if (cmd != null) {
+          response = cmd.execute(cmd.currentParams);
         } else {
           response = '❌ Commande inconnue: "$command"\n\nTapez /help pour voir les commandes disponibles.';
         }

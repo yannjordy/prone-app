@@ -25,7 +25,6 @@ class _WebQrScannerState extends State<_WebQrScanner> with SingleTickerProviderS
   bool _hasError = false;
   String _errorMsg = '';
   late AnimationController _lineController;
-  Timer? _scanTimer;
 
   @override
   void initState() {
@@ -36,54 +35,76 @@ class _WebQrScannerState extends State<_WebQrScanner> with SingleTickerProviderS
 
   Future<void> _initCamera() async {
     try {
+      // Register platform view factory BEFORE creating video
+      _viewId = 'qr-cam-${DateTime.now().millisecondsSinceEpoch}';
+
       _video = html.VideoElement()
         ..autoplay = true
         ..muted = true
+        ..setAttribute('playsinline', '')
         ..style.width = '100%'
         ..style.height = '100%'
-        ..style.objectFit = 'cover';
-      _video!.setAttribute('playsinline', '');
+        ..style.objectFit = 'cover'
+        ..style.backgroundColor = '#000000';
 
-      _stream = await html.window.navigator.mediaDevices!.getUserMedia({
+      // Register the factory first
+      ui_web.platformViewRegistry.registerViewFactory(_viewId!, (int id) {
+        return _video!;
+      });
+
+      // Get camera stream
+      final mediaDevices = html.window.navigator.mediaDevices;
+      if (mediaDevices == null) {
+        throw Exception('mediaDevices non disponible');
+      }
+
+      _stream = await mediaDevices.getUserMedia({
         'video': {'facingMode': 'environment', 'width': {'ideal': 1280}, 'height': {'ideal': 720}},
         'audio': false,
       });
 
       _video!.srcObject = _stream;
-      await _video!.play();
 
-      _viewId = 'qr-cam-${DateTime.now().millisecondsSinceEpoch}';
-      ui_web.platformViewRegistry.registerViewFactory(_viewId!, (int id) => _video!);
+      // Wait for video to be ready
+      await _video!.play();
 
       if (mounted) {
         setState(() => _cameraReady = true);
-        _startBarcodeDetection();
       }
     } catch (e) {
-      if (mounted) setState(() { _hasError = true; _errorMsg = e.toString(); });
+      if (mounted) {
+        setState(() {
+          _hasError = true;
+          _errorMsg = _humanizeError(e);
+        });
+      }
     }
   }
 
-  void _startBarcodeDetection() {
-    _scanTimer = Timer.periodic(const Duration(milliseconds: 700), (_) => _scanFrame());
-  }
-
-  void _scanFrame() {
-    if (_video == null || !_cameraReady || _video!.readyState != 4) return;
-    try {
-      final canvas = html.CanvasElement(width: _video!.videoWidth, height: _video!.videoHeight);
-      canvas.context2D.drawImage(_video!, 0, 0);
-      // BarcodeDetector API - available in Chrome/Edge
-      // If not available, user can paste the link
-    } catch (_) {}
+  String _humanizeError(Object e) {
+    final msg = e.toString();
+    if (msg.contains('NotAllowedError') || msg.contains('Permission')) {
+      return 'Permission camera refusée.\nAutorisez l\'accès dans les paramètres du navigateur.';
+    }
+    if (msg.contains('NotFoundError') || msg.contains('DevicesNotFound')) {
+      return 'Aucune camera détectée sur cet appareil.';
+    }
+    if (msg.contains('NotReadableError')) {
+      return 'Camera utilisée par une autre application.';
+    }
+    if (msg.contains('OverconstrainedError')) {
+      return 'Camera ne supporte pas la résolution demandée.';
+    }
+    return msg;
   }
 
   @override
   void dispose() {
-    _scanTimer?.cancel();
     _lineController.dispose();
-    _stream?.getTracks().forEach((t) => t.stop());
-    _video?.srcObject = null;
+    try {
+      _stream?.getTracks().forEach((t) => t.stop());
+      _video?.srcObject = null;
+    } catch (_) {}
     super.dispose();
   }
 
@@ -129,8 +150,13 @@ class _WebQrScannerState extends State<_WebQrScanner> with SingleTickerProviderS
     return Stack(
       alignment: Alignment.center,
       children: [
+        // Camera feed
         if (_cameraReady && _viewId != null)
-          HtmlElementView(viewType: _viewId!),
+          Positioned.fill(
+            child: HtmlElementView(viewType: _viewId!),
+          ),
+
+        // Loading
         if (!_cameraReady && !_hasError)
           const Center(
             child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -139,6 +165,8 @@ class _WebQrScannerState extends State<_WebQrScanner> with SingleTickerProviderS
               Text('Activation de la camera...', style: TextStyle(color: Colors.white54, fontSize: 14)),
             ]),
           ),
+
+        // Overlays (only when camera is ready)
         if (_cameraReady) ...[
           _buildDimOverlay(),
           _buildScanFrame(),
