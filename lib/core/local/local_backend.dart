@@ -14,34 +14,110 @@ class LocalBackend {
     return await _db.query('organizations', orderBy: 'created_at DESC');
   }
 
-  Future<Map<String, dynamic>> createOrganization(String name, String description) async {
+  Future<Map<String, dynamic>?> getOrganization(String id) async {
+    final results = await _db.query('organizations', where: 'id = ?', whereArgs: [id]);
+    return results.isNotEmpty ? results.first : null;
+  }
+
+  Future<Map<String, dynamic>> createOrganization(String name, String description, {String? photo, String? color}) async {
     final id = _uuid.v4();
     final now = DateTime.now().toIso8601String();
-    final org = {'id': id, 'name': name, 'description': description, 'created_at': now, 'updated_at': now};
+    final initials = name.split(' ').map((w) => w.isNotEmpty ? w[0].toUpperCase() : '').join().substring(0, name.split(' ').length.clamp(0, 2).toInt());
+    final org = {
+      'id': id, 'name': name, 'description': description,
+      'photo': photo ?? '', 'color': color ?? '#555555', 'initials': initials,
+      'is_archived': 0,
+      'created_at': now, 'updated_at': now,
+    };
     await _db.insert('organizations', org);
     return org;
   }
 
+  Future<void> updateOrganization(String id, Map<String, dynamic> updates) async {
+    updates['updated_at'] = DateTime.now().toIso8601String();
+    await _db.update('organizations', updates, where: 'id = ?', whereArgs: [id]);
+  }
+
   Future<void> deleteOrganization(String id) async {
+    for (final table in ['projects', 'members', 'messages', 'logs']) {
+      await _db.delete(table, where: 'organization_id = ?', whereArgs: [id]);
+    }
     await _db.delete('organizations', where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<int> getOrganizationProjectCount(String orgId) async {
+    final projects = await _db.query('projects', where: 'organization_id = ?', whereArgs: [orgId]);
+    return projects.length;
+  }
+
+  Future<int> getOrganizationMemberCount(String orgId) async {
+    final members = await _db.query('members', where: 'organization_id = ?', whereArgs: [orgId]);
+    return members.length;
   }
 
   Future<List<Map<String, dynamic>>> getProjects() async {
     return await _db.query('projects', orderBy: 'updated_at DESC');
   }
 
-  Future<Map<String, dynamic>> createProject(String name, String description, {String? apiKey, String? backendUrl, String? photo}) async {
+  Future<List<Map<String, dynamic>>> getProjectsByOrganization(String orgId) async {
+    return await _db.query('projects', where: 'organization_id = ?', whereArgs: [orgId], orderBy: 'updated_at DESC');
+  }
+
+  Future<Map<String, dynamic>> createProject(String name, String description, {String? apiKey, String? backendUrl, String? photo, String? organizationId}) async {
     final id = _uuid.v4();
     final now = DateTime.now().toIso8601String();
     final project = {
-      'id': id, 'name': name, 'description': description,
+      'id': id, 'organization_id': organizationId ?? '', 'name': name, 'description': description,
       'api_key': apiKey ?? '', 'backend_url': backendUrl ?? '',
       'photo': photo ?? '',
+      'join_code': _generateJoinCode(),
+      'status': '', 'status_type': 'info', 'status_updated_at': '',
       'is_pinned': 0, 'is_archived': 0, 'is_muted': 0,
       'created_at': now, 'updated_at': now,
     };
     await _db.insert('projects', project);
     return project;
+  }
+
+  String _generateJoinCode() {
+    final chars = '0123456789';
+    final rng = DateTime.now().microsecondsSinceEpoch;
+    return List.generate(6, (i) => chars[(rng + i * 7) % chars.length]).join();
+  }
+
+  Future<String> getOrCreateJoinCode(String projectId) async {
+    final projects = await _db.query('projects', where: 'id = ?', whereArgs: [projectId]);
+    if (projects.isEmpty) return '';
+    final project = projects.first;
+    if (project['join_code'] != null && (project['join_code'] as String).isNotEmpty) {
+      return project['join_code'] as String;
+    }
+    final code = _generateJoinCode();
+    await _db.update('projects', {'join_code': code}, where: 'id = ?', whereArgs: [projectId]);
+    return code;
+  }
+
+  Future<Map<String, dynamic>?> findByJoinCode(String code) async {
+    final projects = await _db.query('projects', where: 'join_code = ?', whereArgs: [code]);
+    return projects.isNotEmpty ? projects.first : null;
+  }
+
+  Future<List<Map<String, dynamic>>> searchUsers(String query) async {
+    if (query.isEmpty) return [];
+    final members = await _db.query('members');
+    final q = query.toLowerCase();
+    final seen = <String>{};
+    final results = <Map<String, dynamic>>[];
+    for (final m in members) {
+      final name = (m['name'] as String? ?? '').toLowerCase();
+      final email = (m['email'] as String? ?? '').toLowerCase();
+      if ((name.contains(q) || email.contains(q)) && !seen.contains(email)) {
+        seen.add(email);
+        results.add({'name': m['name'], 'email': m['email'], 'photo': m['photo'] ?? ''});
+      }
+      if (results.length >= 10) break;
+    }
+    return results;
   }
 
   Future<void> updateProject(String id, Map<String, dynamic> updates) async {
@@ -145,14 +221,21 @@ class LocalBackend {
     });
   }
 
-  Future<List<Map<String, dynamic>>> getMembers(String organizationId) async {
+  Future<List<Map<String, dynamic>>> getMembers(String organizationId, {String? projectId}) async {
+    if (projectId != null) {
+      return await _db.query('members', where: 'organization_id = ? AND project_id = ?', whereArgs: [organizationId, projectId]);
+    }
     return await _db.query('members', where: 'organization_id = ?', whereArgs: [organizationId]);
   }
 
-  Future<Map<String, dynamic>> addMember(String organizationId, String name, String email, String role) async {
+  Future<List<Map<String, dynamic>>> getMembersByProject(String projectId) async {
+    return await _db.query('members', where: 'project_id = ?', whereArgs: [projectId]);
+  }
+
+  Future<Map<String, dynamic>> addMember(String organizationId, String name, String email, String role, {String? projectId}) async {
     final id = _uuid.v4();
     final now = DateTime.now().toIso8601String();
-    final member = {'id': id, 'organization_id': organizationId, 'name': name, 'email': email, 'role': role, 'created_at': now};
+    final member = {'id': id, 'organization_id': organizationId, 'project_id': projectId ?? '', 'name': name, 'email': email, 'role': role, 'created_at': now};
     await _db.insert('members', member);
     return member;
   }
@@ -190,6 +273,14 @@ class LocalBackend {
       await _db.insert('connections', {'id': _uuid.v4(), 'project_id': projId, 'name': 'Production', 'url': p['url']!, 'api_key': p['key'], 'status': 'connected', 'created_at': now});
     }
 
-    await _db.insert('members', {'id': _uuid.v4(), 'organization_id': orgId, 'name': 'Admin', 'email': 'admin@prone.app', 'role': 'admin', 'created_at': now});
+    await _db.insert('members', {'id': _uuid.v4(), 'organization_id': orgId, 'project_id': '', 'name': 'Admin', 'email': 'admin@prone.app', 'role': 'admin', 'created_at': now});
+  }
+
+  Future<void> updateProjectStatus(String projectId, String status, {String? statusType}) async {
+    await _db.update('projects', {
+      'status': status,
+      'status_type': statusType ?? 'info',
+      'status_updated_at': DateTime.now().toIso8601String(),
+    }, where: 'id = ?', whereArgs: [projectId]);
   }
 }

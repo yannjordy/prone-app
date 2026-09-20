@@ -92,12 +92,35 @@ class BackendAdapter {
         ),
       );
       final ms = DateTime.now().difference(startTime).inMilliseconds;
+
+      String? faviconUrl;
+      try {
+        final clean = url.replaceAll(RegExp(r'/+$'), '');
+        final faviconResp = await _dio.get('\$clean/favicon.ico',
+          options: Options(receiveTimeout: const Duration(seconds: 3), validateStatus: (s) => s != null && s < 400, responseType: ResponseType.bytes),
+        );
+        if (faviconResp.statusCode == 200 && faviconResp.data != null) {
+          faviconUrl = '\$clean/favicon.ico';
+        }
+      } catch (_) {
+        try {
+          final clean = url.replaceAll(RegExp(r'/+$'), '');
+          final altResp = await _dio.get('\$clean/favicon.png',
+            options: Options(receiveTimeout: const Duration(seconds: 3), validateStatus: (s) => s != null && s < 400),
+          );
+          if (altResp.statusCode == 200) {
+            faviconUrl = '\$clean/favicon.png';
+          }
+        } catch (_) {}
+      }
+
       return BackendCheckResult(
         online: true,
         statusCode: resp.statusCode ?? 0,
         responseTime: ms,
         type: adapter.typeName,
         message: '✅ ${adapter.typeName} connecté!\n\nURL: $url\nType: ${adapter.typeName}\nStatus: ${resp.statusCode}\nTemps: ${ms}ms\n\nLe backend est opérationnel.',
+        faviconUrl: faviconUrl,
       );
     } on DioException catch (e) {
       return BackendCheckResult(
@@ -181,5 +204,6 @@ class BackendCheckResult {
   final int responseTime;
   final String type;
   final String message;
-  BackendCheckResult({required this.online, required this.statusCode, required this.responseTime, required this.type, required this.message});
+  final String? faviconUrl;
+  BackendCheckResult({required this.online, required this.statusCode, required this.responseTime, required this.type, required this.message, this.faviconUrl});
 }

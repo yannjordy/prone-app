@@ -94,46 +94,54 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         _projectImageBytes = imageBytes;
       });
     }
-    final orgs = await _backend.getOrganizations();
-    if (orgs.isNotEmpty) {
-      final members = await _backend.getMembers(orgs.first['id'] as String);
-      members.sort((a, b) {
-        final dateA = (a['created_at'] as String?) ?? '';
-        final dateB = (b['created_at'] as String?) ?? '';
-        return dateA.compareTo(dateB);
-      });
-      if (mounted) {
-        final memberList = <_Member>[];
-        // Load bot photo
-        Uint8List? botPhoto;
-        try {
-          final prefs = await SharedPreferences.getInstance();
-          final savedBotPhoto = prefs.getString('bot_photo_${widget.projectId}');
-          if (savedBotPhoto != null && savedBotPhoto.isNotEmpty) {
-            botPhoto = base64Decode(savedBotPhoto);
-          }
-        } catch (_) {}
-        final botName = await _getBotName();
-        memberList.add(_Member(name: botName, initials: 'BOT', color: const Color(0xFF55EFC4), isOnline: true, isBot: true, photo: botPhoto));
-        for (final m in members) {
-          final name = (m['name'] as String?) ?? '';
-          final email = (m['email'] as String?) ?? '';
-          final role = (m['role'] as String?) ?? 'member';
-          final photo = (m['photo'] as String?) ?? '';
-          Uint8List? photoBytes;
-          try { if (photo.isNotEmpty) photoBytes = base64Decode(photo); } catch (_) {}
-          final hash = name.hashCode;
-          final colors = [AppColors.primary, const Color(0xFF00CEC9), const Color(0xFF00B894), const Color(0xFF6C5CE7), const Color(0xFFE17055)];
-          final colorVal = colors[hash.abs() % colors.length];
-          final initials = name.split(' ').where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join().toUpperCase();
-          memberList.add(_Member(name: name.isEmpty ? email : name, initials: initials.isEmpty ? '?' : initials, color: colorVal, isOnline: true, photo: photoBytes, role: role, email: email));
+    final members = await _backend.getMembersByProject(widget.projectId);
+    members.sort((a, b) {
+      final dateA = (a['created_at'] as String?) ?? '';
+      final dateB = (b['created_at'] as String?) ?? '';
+      return dateA.compareTo(dateB);
+    });
+    if (mounted) {
+      final memberList = <_Member>[];
+      Uint8List? botPhoto;
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final savedBotPhoto = prefs.getString('bot_photo_${widget.projectId}');
+        if (savedBotPhoto != null && savedBotPhoto.isNotEmpty) {
+          botPhoto = base64Decode(savedBotPhoto);
         }
-        setState(() {
-          _members.clear();
-          _members.addAll(memberList);
-          _userRole = (members.isNotEmpty ? (members.first['role'] as String?) : null) ?? 'admin';
-        });
+      } catch (_) {}
+      final botName = await _getBotName();
+      memberList.add(_Member(name: botName, initials: 'BOT', color: const Color(0xFF55EFC4), isOnline: true, isBot: true, photo: botPhoto));
+      for (final m in members) {
+        final name = (m['name'] as String?) ?? '';
+        final email = (m['email'] as String?) ?? '';
+        final role = (m['role'] as String?) ?? 'viewer';
+        final photo = (m['photo'] as String?) ?? '';
+        Uint8List? photoBytes;
+        try { if (photo.isNotEmpty) photoBytes = base64Decode(photo); } catch (_) {}
+        final hash = name.hashCode;
+        final colors = [AppColors.primary, const Color(0xFF00CEC9), const Color(0xFF00B894), const Color(0xFF6C5CE7), const Color(0xFFE17055)];
+        final colorVal = colors[hash.abs() % colors.length];
+        final initials = name.split(' ').where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join().toUpperCase();
+        memberList.add(_Member(name: name.isEmpty ? email : name, initials: initials.isEmpty ? '?' : initials, color: colorVal, isOnline: true, photo: photoBytes, role: role, email: email));
       }
+      // Current user is the first member (oldest = admin)
+      if (members.isNotEmpty) {
+        final firstMember = members.first;
+        _currentUser = _Member(
+          name: (firstMember['name'] as String?) ?? 'Vous',
+          initials: ((firstMember['name'] as String?) ?? 'V').split(' ').where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join().toUpperCase(),
+          color: AppColors.primary,
+          isOnline: true,
+          role: (firstMember['role'] as String?) ?? 'admin',
+          email: (firstMember['email'] as String?) ?? '',
+        );
+      }
+      setState(() {
+        _members.clear();
+        _members.addAll(memberList);
+        _userRole = (members.isNotEmpty ? (members.first['role'] as String?) : null) ?? 'admin';
+      });
     }
     final msgs = await _backend.getMessages(widget.projectId);
     setState(() {
@@ -885,7 +893,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                         children: [
                           _buildRoleChip('Admin', 'Admin', selectedRole, (v) => setSheetState(() => selectedRole = v)),
                           const SizedBox(width: 8),
-                          _buildRoleChip('Membre', 'Membre', selectedRole, (v) => setSheetState(() => selectedRole = v)),
+                          _buildRoleChip('Éditeur', 'Membre', selectedRole, (v) => setSheetState(() => selectedRole = v)),
                           const SizedBox(width: 8),
                           _buildRoleChip('Lecteur', 'Lecteur', selectedRole, (v) => setSheetState(() => selectedRole = v)),
                         ],
@@ -898,13 +906,20 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                       Expanded(child: GestureDetector(onTap: () => Navigator.pop(context), child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(12), border: Border.all(color: ThemeHelper.borderLight(context))), child: Center(child: Text('Annuler', style: TextStyle(color: ThemeHelper.textDim(context), fontSize: 14)))))),
                       const SizedBox(width: 12),
                       Expanded(child: GestureDetector(
-                        onTap: () {
+                        onTap: () async {
                           if (emailController.text.isNotEmpty && emailController.text.contains('@')) {
-                            setState(() {
-                              _members.add(_Member(name: emailController.text.split('@')[0], initials: emailController.text.substring(0, 2).toUpperCase(), color: AppColors.primaryDark, isOnline: false));
-                            });
+                            final email = emailController.text.trim();
+                            final name = email.split('@')[0];
+                            final roleMap = {'Admin': 'admin', 'Membre': 'editor', 'Lecteur': 'viewer'};
+                            final role = roleMap[selectedRole] ?? 'viewer';
+                            final orgs = await _backend.getOrganizations();
+                            if (orgs.isNotEmpty) {
+                              await _backend.addMember(orgs.first['id'] as String, name, email, role, projectId: widget.projectId);
+                            }
                             Navigator.pop(context);
-                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Invitation envoyée à ${emailController.text}'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                            _loadProjectData();
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Invitation envoyée à $email (rôle: $selectedRole)'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
                           }
                         },
                         child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Envoyer', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))),
@@ -1515,19 +1530,32 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     );
   }
 
+  Future<void> _updateProjectStatus(String status, String type) async {
+    await _backend.updateProjectStatus(widget.projectId, status, statusType: type);
+  }
+
   Future<String> _executeRealCommand(String command) async {
-    if (_backendUrl.isEmpty) return '⚠️ Aucun backend configuré.';
+    if (_backendUrl.isEmpty) {
+      _updateProjectStatus('Backend non configure', 'warning');
+      return '⚠️ Aucun backend configuré.\nConnectez un backend dans les paramètres du projet.';
+    }
     final parts = command.trim().split(RegExp(r'\s+'));
     final cmd = parts[0].toLowerCase().replaceFirst('/', '');
     final args = parts.sublist(1);
 
     try {
       if (cmd == 'users') {
+        if (args.isNotEmpty) {
+          final field = args[0].contains('@') ? 'email' : 'name';
+          return await _searchTable('users', field, args[0]);
+        }
         return await _fetchTable('users', limit: 50);
       } else if (cmd == 'products' || cmd == 'produits') {
-        return await _fetchTable(args.isNotEmpty ? args[0] : 'products', limit: 50);
+        if (args.isNotEmpty) return await _searchTable('products', 'name', args.join(' '));
+        return await _fetchTable('products', limit: 50);
       } else if (cmd == 'orders' || cmd == 'commandes') {
-        return await _fetchTable(args.isNotEmpty ? args[0] : 'orders', limit: 50);
+        if (args.isNotEmpty) return await _searchTable('orders', 'id', args[0]);
+        return await _fetchTable('orders', limit: 50);
       } else if (cmd == 'count') {
         if (args.isEmpty) return '❌ Usage: /count <table>';
         return await _fetchTable(args[0], limit: 1000, countOnly: true);
@@ -1536,15 +1564,16 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         final limit = args.length > 1 ? int.tryParse(args[1]) ?? 5 : 5;
         return await _fetchTable(args[0], limit: limit);
       } else if (cmd == 'search') {
-        if (args.length < 3) return '❌ Usage: /search <table> <field> <value>';
+        if (args.length < 3) return '❌ Usage: /search <table> <champ> <valeur>';
         return await _searchTable(args[0], args[1], args.sublist(2).join(' '));
       } else if (cmd == 'schema') {
         if (args.isEmpty) return '❌ Usage: /schema <table>';
         return await _fetchSchema(args[0]);
       }
-      return '❌ Commande inconnue: "$command"';
+      return '❌ Commande inconnue: "$command"\n\nTapez /help pour les commandes disponibles.';
     } catch (e) {
-      return '❌ Erreur backend: $e';
+      _updateProjectStatus('Erreur: \$e', 'error');
+      return '❌ Erreur backend: \$e';
     }
   }
 
@@ -1569,13 +1598,13 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     );
 
     if (resp.statusCode != 200) {
-      return '❌ Erreur ${resp.statusCode} sur $table\n\nLe serveur a retourné: ${resp.statusCode}';
+      return '❌ Erreur ${resp.statusCode} sur "$table"\nURL: $url\n\nVérifiez que la table "$table" existe dans votre backend.';
     }
 
     final data = resp.data;
     if (data is List) {
-      if (countOnly) return '🔢 Nombre de lignes dans "$table": **${data.length}**';
-      if (data.isEmpty) return 'ℹ️ Table "$table" vide.';
+      if (countOnly) return '🔢 Nombre de lignes dans "$table": ${data.length}';
+      if (data.isEmpty) return 'ℹ️ Table "$table" vide ou inexistante.';
       final buf = StringBuffer('📋 **$table** (${data.length} entrées):\n\n');
       for (var i = 0; i < data.length && i < limit; i++) {
         final item = data[i];
@@ -1611,7 +1640,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       options: Options(headers: headers, receiveTimeout: const Duration(seconds: 10), validateStatus: (s) => s != null && s < 500),
     );
 
-    if (resp.statusCode != 200) return '❌ Erreur ${resp.statusCode}';
+    if (resp.statusCode != 200) return '❌ Erreur ${resp.statusCode} pour $field="$value" dans $table';
     final data = resp.data;
     if (data is List && data.isNotEmpty) {
       final buf = StringBuffer('🔍 Résultats pour $field="$value" dans $table (${data.length}):\n\n');
@@ -1629,7 +1658,6 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   Future<String> _fetchSchema(String table) async {
     final clean = _backendUrl.replaceAll(RegExp(r'/+$'), '');
     if (_backendType == 'supabase') {
-      // Supabase: fetch one row to infer schema
       final url = '$clean/rest/v1/$table?select=*&limit=1';
       final headers = {'apikey': _projectApiKey, 'Authorization': 'Bearer $_projectApiKey'};
       final dio = Dio();
@@ -1655,7 +1683,6 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   void _sendCommand(String command) async {
     if (command.trim().isEmpty) return;
 
-    // Check for @ mentions
     final mentionMatch = RegExp(r'@(\w+)').firstMatch(command);
     if (mentionMatch != null) {
       final mentionedName = mentionMatch.group(1);
@@ -1679,7 +1706,6 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       return;
     }
 
-    // Only slash commands trigger the bot
     if (!command.startsWith('/')) {
       setState(() { _isTyping = false; });
       return;
@@ -1690,26 +1716,27 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       String response;
       final lower = command.toLowerCase().trim();
 
-      // Commands that query the REAL backend
-      final realCommands = ['/users', '/products', '/produits', '/orders', '/commandes',
-        '/count', '/last', '/search', '/schema', '/table'];
-      final matchesReal = realCommands.any((c) => lower.startsWith(c));
-
-      if (matchesReal && _backendUrl.isNotEmpty) {
-        response = await _executeRealCommand(command);
-      } else if (lower == '/help' || lower == '/aide') {
-        response = '🤖 Commandes Prone:\n\n/status - Vérifier le backend\n/test - Tester la connexion\n/tables - Lister les tables\n/users - Utilisateurs réels\n/products - Produits réels\n/count <table> - Compter\n/last <table> [n] - Dernières lignes\n/search <table> <champ> <valeur> - Rechercher\n/schema <table> - Structure\n/protect - Rapport sécurité\n/help - Aide';
-      } else if (lower == '/status' || lower == '/test') {
-        response = await _checkBackendStatus();
-      } else if (lower == '/tables') {
-        response = await _listTables();
-      } else if (lower == '/protect') {
-        response = _protector.getStatusReport();
+      if (_backendUrl.isEmpty) {
+        if (lower == '/help' || lower == '/aide') {
+          response = '🤖 Commandes Prone:\n\n/connect - Connecter un backend\n/status - Vérifier le backend\n/help - Aide\n\n⚠️ Connectez un backend pour utiliser /users, /products, etc.';
+        } else {
+          response = '⚠️ Aucun backend configuré.\n\nConnectez un backend dans les paramètres du projet pour utiliser les commandes de données.\n\nTapez /help pour les commandes disponibles.';
+        }
       } else {
-        // Try command library for system/mock commands
-        final cmd = CommandLibrary.findCommand(command);
-        if (cmd != null) {
-          response = cmd.execute(cmd.currentParams);
+        final dataCommands = ['/users', '/products', '/produits', '/orders', '/commandes',
+          '/count', '/last', '/search', '/schema', '/table'];
+        final matchesData = dataCommands.any((c) => lower.startsWith(c));
+
+        if (matchesData) {
+          response = await _executeRealCommand(command);
+        } else if (lower == '/help' || lower == '/aide') {
+          response = '🤖 Commandes Prone:\n\n/status - Vérifier le backend\n/test - Tester la connexion\n/tables - Lister les tables\n/users - Tous les utilisateurs\n/users <email> - Chercher par email\n/products - Tous les produits\n/count <table> - Compter\n/last <table> [n] - Dernières lignes\n/search <table> <champ> <valeur> - Rechercher\n/schema <table> - Structure\n/protect - Rapport sécurité\n/help - Aide';
+        } else if (lower == '/status' || lower == '/test') {
+          response = await _checkBackendStatus();
+        } else if (lower == '/tables') {
+          response = await _listTables();
+        } else if (lower == '/protect') {
+          response = _protector.getStatusReport();
         } else {
           response = '❌ Commande inconnue: "$command"\n\nTapez /help pour voir les commandes disponibles.';
         }
@@ -1817,9 +1844,22 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   }
 
   Future<String> _checkBackendStatus() async {
-    if (_backendUrl.isEmpty) return '⚠️ Aucun backend configuré.';
-    final result = await BackendAdapter.check(_backendUrl, _projectApiKey, type: _backendType);
-    return result.message;
+    if (_backendUrl.isEmpty) {
+      _updateProjectStatus('Backend non configure', 'warning');
+      return '⚠️ Aucun backend configuré.';
+    }
+    try {
+      final result = await BackendAdapter.check(_backendUrl, _projectApiKey, type: _backendType);
+      if (result.online) {
+        _updateProjectStatus('En ligne - ${result.responseTime}ms', 'success');
+      } else {
+        _updateProjectStatus('Hors ligne', 'error');
+      }
+      return result.message;
+    } catch (e) {
+      _updateProjectStatus('Erreur de connexion', 'error');
+      return '❌ Erreur: $e';
+    }
   }
 
   Future<String> _listTables() async {

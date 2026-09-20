@@ -22,6 +22,9 @@ dependencies:
   shared_preferences: ^2.2.2
   path: ^1.8.3
   
+  # Permissions
+  permission_handler: ^11.1.0
+  
   # UI
   google_fonts: ^6.1.0
   flutter_svg: ^2.0.9

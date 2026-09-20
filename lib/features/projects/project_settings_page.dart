@@ -79,13 +79,10 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
   }
 
   Future<void> _loadMembers() async {
-    final orgs = await _backend.getOrganizations();
-    if (orgs.isEmpty) { if (mounted) setState(() { _members = []; _membersLoading = false; }); return; }
-    final orgId = (orgs.first['id'] as String?) ?? '';
-    final members = await _backend.getMembers(orgId);
+    final members = await _backend.getMembersByProject(widget.projectId);
     members.sort((a, b) {
-      final roleA = _rolePriority[(a['role'] as String?) ?? 'member'] ?? 3;
-      final roleB = _rolePriority[(b['role'] as String?) ?? 'member'] ?? 3;
+      final roleA = _rolePriority[(a['role'] as String?) ?? 'viewer'] ?? 3;
+      final roleB = _rolePriority[(b['role'] as String?) ?? 'viewer'] ?? 3;
       if (roleA != roleB) return roleA.compareTo(roleB);
       final dateA = (a['created_at'] as String?) ?? '';
       final dateB = (b['created_at'] as String?) ?? '';
@@ -517,11 +514,29 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
                     decoration: BoxDecoration(color: ThemeHelper.bg(ctx), borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)),
                     child: Row(children: [
                       Container(width: 40, height: 40, decoration: BoxDecoration(color: AppColors.success.withOpacity(0.1), borderRadius: BorderRadius.circular(10)),
-                        child: Center(child: Icon(Icons.qr_code, color: AppColors.success, size: 20))),
+                        child: Center(child: SvgPicture.asset('assets/icons/qr_code.svg', width: 20, height: 20, colorFilter: const ColorFilter.mode(AppColors.success, BlendMode.srcIn)))),
                       const SizedBox(width: 12),
                       Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                         Text('Par QR Code', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: textColor)),
                         Text('Scanner pour rejoindre le projet', style: TextStyle(fontSize: 12, color: textDimColor)),
+                      ])),
+                      Icon(Icons.chevron_right_rounded, color: textDimColor, size: 20),
+                    ]),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                GestureDetector(
+                  onTap: () { Navigator.pop(ctx); _showCodeInvite(surfaceColor, borderColor, textColor, textDimColor); },
+                  child: Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(color: ThemeHelper.bg(ctx), borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)),
+                    child: Row(children: [
+                      Container(width: 40, height: 40, decoration: BoxDecoration(color: AppColors.warning.withOpacity(0.1), borderRadius: BorderRadius.circular(10)),
+                        child: Center(child: SvgPicture.asset('assets/icons/lock.svg', width: 20, height: 20, colorFilter: const ColorFilter.mode(AppColors.warning, BlendMode.srcIn)))),
+                      const SizedBox(width: 12),
+                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text('Par code', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: textColor)),
+                        Text('Partager un code a 6 chiffres', style: TextStyle(fontSize: 12, color: textDimColor)),
                       ])),
                       Icon(Icons.chevron_right_rounded, color: textDimColor, size: 20),
                     ]),
@@ -606,7 +621,7 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
                         final email = emailCtrl.text.trim();
                         final name = email.split('@')[0];
                         final orgs = await _backend.getOrganizations();
-                        if (orgs.isNotEmpty) await _backend.addMember((orgs.first['id'] as String?) ?? '', name, email, selectedRole);
+                        if (orgs.isNotEmpty) await _backend.addMember((orgs.first['id'] as String?) ?? '', name, email, selectedRole, projectId: widget.projectId);
                         Navigator.pop(ctx);
                         _loadMembers();
                         if (!mounted) return;
@@ -617,6 +632,67 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
                   ]),
                 ],
               ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showCodeInvite(Color surfaceColor, Color borderColor, Color textColor, Color textDimColor) async {
+    final code = await _backend.getOrCreateJoinCode(widget.projectId);
+    showModalBottomSheet(
+      context: context, backgroundColor: Colors.transparent, useRootNavigator: true, isScrollControlled: true,
+      builder: (ctx) => ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+          child: Container(
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(color: surfaceColor.withOpacity(0.95), borderRadius: const BorderRadius.vertical(top: Radius.circular(24))),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: borderColor, borderRadius: BorderRadius.circular(2)))),
+                const SizedBox(height: 20),
+                Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  SvgPicture.asset('assets/icons/lock.svg', width: 20, height: 20, colorFilter: ColorFilter.mode(AppColors.warning, BlendMode.srcIn)),
+                  const SizedBox(width: 8),
+                  Text('Code d\'invitation', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
+                ]),
+                const SizedBox(height: 8),
+                Text('Partagez ce code pour rejoindre le projet', style: TextStyle(fontSize: 13, color: textDimColor)),
+                const SizedBox(height: 24),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
+                  decoration: BoxDecoration(color: ThemeHelper.bg(ctx), borderRadius: BorderRadius.circular(16), border: Border.all(color: borderColor)),
+                  child: Text(code, textAlign: TextAlign.center, style: TextStyle(fontSize: 36, fontWeight: FontWeight.w700, color: AppColors.primary, letterSpacing: 8, fontFamily: 'monospace')),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(child: GestureDetector(
+                      onTap: () {
+                        Clipboard.setData(ClipboardData(text: code));
+                        ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: const Text('Code copie'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                      },
+                      child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: ThemeHelper.bg(ctx), borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)), child: Center(child: Text('Copier', style: TextStyle(color: textColor, fontSize: 14, fontWeight: FontWeight.w600)))),
+                    )),
+                    const SizedBox(width: 12),
+                    Expanded(child: GestureDetector(
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Code partage'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                      },
+                      child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Partager', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))),
+                    )),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                GestureDetector(onTap: () => Navigator.pop(ctx), child: Container(width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.1), borderRadius: BorderRadius.circular(12)), child: Center(child: Text('Fermer', style: TextStyle(color: AppColors.primary, fontSize: 14))))),
+                SizedBox(height: MediaQuery.of(ctx).padding.bottom + 16),
+              ],
             ),
           ),
         ),
@@ -937,11 +1013,11 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
         final orgs = await _backend.getOrganizations();
         if (orgs.isNotEmpty) {
           final orgId = orgs.first['id'] as String;
-          final members = await _backend.getMembers(orgId);
+          final members = await _backend.getMembersByProject(widget.projectId);
           final m = members.firstWhere((x) => x['id'] == memberId, orElse: () => <String, dynamic>{});
           if (m.isNotEmpty) {
             await _backend.removeMember(orgId, memberId);
-            await _backend.addMember(orgId, (m['name'] as String?) ?? '', (m['email'] as String?) ?? '', role);
+            await _backend.addMember(orgId, (m['name'] as String?) ?? '', (m['email'] as String?) ?? '', role, projectId: widget.projectId);
           }
         }
         _loadMembers();

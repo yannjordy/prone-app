@@ -21,6 +21,7 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
   bool _hasError = false;
   String _errorMsg = '';
   bool _isProcessing = false;
+  bool _isStarting = false;
   late AnimationController _lineController;
 
   @override
@@ -31,17 +32,45 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
   }
 
   Future<void> _initCamera() async {
+    if (_isStarting) return;
+    _isStarting = true;
+
     try {
       _cameraController = MobileScannerController(
         detectionSpeed: DetectionSpeed.normal,
         facing: CameraFacing.back,
         torchEnabled: false,
+        formats: [BarcodeFormat.qrCode],
       );
+
       await _cameraController!.start();
-      if (mounted) setState(() => _cameraReady = true);
+
+      if (mounted) {
+        setState(() {
+          _cameraReady = true;
+          _isStarting = false;
+        });
+      }
     } catch (e) {
-      if (mounted) setState(() { _hasError = true; _errorMsg = e.toString(); });
+      if (mounted) {
+        setState(() {
+          _hasError = true;
+          _isStarting = false;
+          _errorMsg = _humanizeError(e);
+        });
+      }
     }
+  }
+
+  String _humanizeError(Object e) {
+    final msg = e.toString();
+    if (msg.contains('Permission') || msg.contains('permission')) {
+      return 'Permission camera refusee.\nAutorisez l\'acces dans les parametres.';
+    }
+    if (msg.contains('camera') || msg.contains('Camera')) {
+      return 'Camera non disponible.';
+    }
+    return 'Erreur: $msg';
   }
 
   @override
@@ -106,8 +135,16 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
     return Stack(
       alignment: Alignment.center,
       children: [
-        if (_cameraReady && _cameraController != null)
-          MobileScanner(controller: _cameraController!, onDetect: _onDetect),
+        // Camera - always render but hide until ready
+        if (_cameraController != null)
+          Positioned.fill(
+            child: MobileScanner(
+              controller: _cameraController!,
+              onDetect: _onDetect,
+            ),
+          ),
+
+        // Loading
         if (!_cameraReady && !_hasError)
           const Center(
             child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -116,6 +153,8 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
               Text('Activation de la camera...', style: TextStyle(color: Colors.white54, fontSize: 14)),
             ]),
           ),
+
+        // Overlays (only when camera is ready)
         if (_cameraReady) ...[
           _buildDimOverlay(),
           _buildScanFrame(),
@@ -191,6 +230,18 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
           const Text('Camera indisponible', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.white)),
           const SizedBox(height: 8),
           Text(_errorMsg.isNotEmpty ? _errorMsg : 'Autorisez l\'acces a la camera.', textAlign: TextAlign.center, style: const TextStyle(fontSize: 13, color: Colors.white54)),
+          const SizedBox(height: 20),
+          GestureDetector(
+            onTap: () {
+              setState(() { _hasError = false; _cameraReady = false; });
+              _initCamera();
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+              decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.2), borderRadius: BorderRadius.circular(12)),
+              child: const Text('Reessayer', style: TextStyle(color: AppColors.primary, fontSize: 14, fontWeight: FontWeight.w600)),
+            ),
+          ),
         ]),
       ),
     );

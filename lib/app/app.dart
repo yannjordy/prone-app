@@ -208,7 +208,7 @@ final _router = GoRouter(
       routes: [
         GoRoute(path: '/', builder: (_, __) => const OrgListScreen()),
         GoRoute(path: '/organizations', builder: (_, __) => const OrgListScreen()),
-        GoRoute(path: '/organization', builder: (_, __) => const OrganizationScreen()),
+        GoRoute(path: '/organization/:orgId', builder: (_, state) => OrganizationScreen(orgId: state.pathParameters['orgId']!)),
         GoRoute(path: '/projects', builder: (_, __) => const ProjectListScreen()),
         GoRoute(
           path: '/projects/:projectId',

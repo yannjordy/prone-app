@@ -42,6 +42,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
   int _createFormStep = 0;
   bool _backendVerified = false;
   bool _isVerifying = false;
+  String? _verifyFaviconUrl;
   late final AnimationController _verifyingAnimController;
 
   @override
@@ -86,7 +87,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
           name: name,
           initials: initials.isEmpty ? '??' : initials,
           color: Color(0xFF000000 + colorValue),
-          lastMessage: 'Backend connecté',
+          lastMessage: 'Backend connecte',
           time: '',
           timestamp: DateTime.tryParse((p['created_at'] as String?) ?? '') ?? DateTime.now(),
           isArchived: (p['is_archived'] as int?) == 1,
@@ -95,6 +96,9 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
           apiKey: (p['api_key'] as String?) ?? '',
           backendUrl: (p['backend_url'] as String?) ?? '',
           imageBytes: imageBytes,
+          status: (p['status'] as String?) ?? '',
+          statusType: (p['status_type'] as String?) ?? 'info',
+          statusUpdatedAt: DateTime.tryParse((p['status_updated_at'] as String?) ?? ''),
         );
       }).toList();
     });
@@ -266,6 +270,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
                         setState(() { _showMenu = false; _showCreateForm = true; });
                       }),
                       _MenuItem(icon: 'qr_code.svg', label: 'Scanner QR Code', onTap: () { setState(() { _showMenu = false; }); _showScanDialog(); }),
+                      _MenuItem(icon: 'lock.svg', label: 'Rejoindre par code', onTap: () { setState(() { _showMenu = false; }); _showJoinByCodeDialog(); }),
                       _MenuItem(icon: 'search.svg', label: 'Rechercher', onTap: () { setState(() { _showMenu = false; _showSearch = true; }); }),
                       Divider(color: ThemeHelper.borderLight(context), height: 1),
                       _MenuItem(icon: 'grid.svg', label: _isGridView ? 'Vue liste' : 'Vue grille', onTap: () { final v = !_isGridView; _saveViewPreference(v); setState(() { _showMenu = false; _isGridView = v; }); }),
@@ -780,24 +785,36 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
           animation: _verifyingAnimController,
           builder: (context, _) {
             return Container(
-              width: 80, height: 80,
+              width: 100, height: 100,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                border: Border.all(color: AppColors.primary.withOpacity(0.2 + _verifyingAnimController.value * 0.6), width: 3),
+                border: Border.all(color: _verifyFaviconUrl != null
+                  ? AppColors.success.withOpacity(0.6 + _verifyingAnimController.value * 0.4)
+                  : AppColors.primary.withOpacity(0.2 + _verifyingAnimController.value * 0.6), width: 3),
               ),
-              child: Center(
-                child: SizedBox(
-                  width: 40, height: 40,
-                  child: CircularProgressIndicator(strokeWidth: 3, valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary)),
-                ),
-              ),
+              child: _verifyFaviconUrl != null
+                ? ClipOval(
+                    child: Image.network(
+                      _verifyFaviconUrl!,
+                      width: 94, height: 94, fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => Icon(Icons.check_circle, size: 48, color: AppColors.success),
+                    ),
+                  )
+                : Center(
+                    child: SizedBox(
+                      width: 40, height: 40,
+                      child: CircularProgressIndicator(strokeWidth: 3, valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary)),
+                    ),
+                  ),
             );
           },
         ),
         const SizedBox(height: 24),
-        Text('Verification en cours...', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: textColor)),
+        Text(_verifyFaviconUrl != null ? 'Backend connecté!' : 'Verification en cours...',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: _verifyFaviconUrl != null ? AppColors.success : textColor)),
         const SizedBox(height: 8),
-        Text('Test de connexion au backend', style: TextStyle(fontSize: 13, color: textDimColor)),
+        Text(_verifyFaviconUrl != null ? 'Logo du backend détecté ✓' : 'Test de connexion au backend',
+          style: TextStyle(fontSize: 13, color: textDimColor)),
         const SizedBox(height: 24),
       ],
     );
@@ -827,7 +844,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Veuillez remplir tous les champs obligatoires'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
       return;
     }
-    setState(() { _createFormStep = 1; _isVerifying = true; });
+    setState(() { _createFormStep = 1; _isVerifying = true; _verifyFaviconUrl = null; });
 
     try {
       final url = _backendUrlController.text.trim();
@@ -838,14 +855,16 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
       if (!mounted) return;
       if (result.online) {
         _backendVerified = true;
+        setState(() { _verifyFaviconUrl = result.faviconUrl; });
+        await Future.delayed(const Duration(milliseconds: 600));
         _createProject();
       } else {
-        setState(() { _createFormStep = 0; _isVerifying = false; });
+        setState(() { _createFormStep = 0; _isVerifying = false; _verifyFaviconUrl = null; });
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(result.message), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
       }
     } catch (e) {
       if (!mounted) return;
-      setState(() { _createFormStep = 0; _isVerifying = false; });
+      setState(() { _createFormStep = 0; _isVerifying = false; _verifyFaviconUrl = null; });
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur: $e'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
     }
   }
@@ -857,7 +876,13 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
     }
     try {
       final name = _newNameController.text;
-      await _backend.createProject(name, _newDescController.text, apiKey: _apiKeyController.text, backendUrl: _backendUrlController.text);
+      final project = await _backend.createProject(name, _newDescController.text, apiKey: _apiKeyController.text, backendUrl: _backendUrlController.text);
+      final projectId = project['id'] as String;
+      // Add creator as admin member for this project
+      final orgs = await _backend.getOrganizations();
+      if (orgs.isNotEmpty) {
+        await _backend.addMember(orgs.first['id'] as String, 'Admin', 'admin@prone.app', 'admin', projectId: projectId);
+      }
       setState(() {
         _showCreateForm = false;
         _createFormStep = 0;
@@ -874,6 +899,93 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur: $e'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
     }
+  }
+
+  void _showJoinByCodeDialog() {
+    final codeController = TextEditingController();
+    final surfaceColor = ThemeHelper.surface(context);
+    final borderColor = ThemeHelper.borderLight(context);
+    final textColor = ThemeHelper.text(context);
+    final textDimColor = ThemeHelper.textDim(context);
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) => ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+          child: Container(
+            padding: EdgeInsets.fromLTRB(24, 24, 24, MediaQuery.of(context).viewInsets.bottom + 24),
+            decoration: BoxDecoration(color: surfaceColor.withOpacity(0.95), borderRadius: const BorderRadius.vertical(top: Radius.circular(24))),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(width: 40, height: 4, decoration: BoxDecoration(color: borderColor, borderRadius: BorderRadius.circular(2))),
+                const SizedBox(height: 20),
+                Row(
+                  children: [
+                    SvgPicture.asset('assets/icons/lock.svg', width: 20, height: 20, colorFilter: const ColorFilter.mode(AppColors.warning, BlendMode.srcIn)),
+                    const SizedBox(width: 8),
+                    Text('Rejoindre par code', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text('Entrez le code a 6 chiffres', style: TextStyle(fontSize: 13, color: textDimColor)),
+                const SizedBox(height: 20),
+                TextField(
+                  controller: codeController,
+                  keyboardType: TextInputType.number,
+                  maxLength: 6,
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w600, color: textColor, letterSpacing: 8),
+                  textAlign: TextAlign.center,
+                  decoration: InputDecoration(
+                    hintText: '000000',
+                    hintStyle: TextStyle(color: textDimColor.withOpacity(0.3), letterSpacing: 8),
+                    filled: true, fillColor: ThemeHelper.bg(context),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: borderColor)),
+                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.warning)),
+                    counterText: '',
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Row(
+                  children: [
+                    Expanded(child: GestureDetector(
+                      onTap: () => Navigator.pop(context),
+                      child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)), child: Center(child: Text('Annuler', style: TextStyle(color: textDimColor, fontSize: 14)))),
+                    )),
+                    const SizedBox(width: 12),
+                    Expanded(child: GestureDetector(
+                      onTap: () async {
+                        if (codeController.text.length == 6) {
+                          final project = await _backend.findByJoinCode(codeController.text);
+                          if (project != null) {
+                            Navigator.pop(context);
+                            final orgs = await _backend.getOrganizations();
+                            if (orgs.isNotEmpty) {
+                              await _backend.addMember(orgs.first['id'], 'Membre', 'membre@prone.app', 'membre', projectId: project['id']);
+                            }
+                            _loadProjects();
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Vous avez rejoint ${project['name']}'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                          } else {
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Code invalide'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                          }
+                        }
+                      },
+                      child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Rejoindre', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))),
+                    )),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   void _showScanDialog() {
@@ -1047,6 +1159,15 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
   }
 }
 
+Color _statusColor(String type) {
+  switch (type) {
+    case 'error': return AppColors.error;
+    case 'warning': return AppColors.warning;
+    case 'success': return AppColors.success;
+    default: return AppColors.primary;
+  }
+}
+
 class _Project {
   final String id;
   String name;
@@ -1062,7 +1183,10 @@ class _Project {
   final String apiKey;
   final String backendUrl;
   Uint8List? imageBytes;
-  _Project({required this.id, required this.name, required this.initials, required this.color, required this.lastMessage, required this.time, required this.timestamp, this.unread = 0, this.isArchived = false, this.isMuted = false, this.isPinned = false, this.apiKey = '', this.backendUrl = '', this.imageBytes});
+  String status;
+  String statusType;
+  DateTime? statusUpdatedAt;
+  _Project({required this.id, required this.name, required this.initials, required this.color, required this.lastMessage, required this.time, required this.timestamp, this.unread = 0, this.isArchived = false, this.isMuted = false, this.isPinned = false, this.apiKey = '', this.backendUrl = '', this.imageBytes, this.status = '', this.statusType = 'info', this.statusUpdatedAt});
 }
 
 class _MenuItem extends StatelessWidget {
@@ -1171,7 +1295,34 @@ class _ProjectCard extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 4),
-                  Text(project.lastMessage, style: TextStyle(fontSize: 13, color: textDimColor, decoration: project.isArchived ? TextDecoration.lineThrough : null), maxLines: 1, overflow: TextOverflow.ellipsis),
+                  if (project.status.isNotEmpty)
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 500),
+                      child: Container(
+                        key: ValueKey(project.status),
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: _statusColor(project.statusType).withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: _statusColor(project.statusType).withOpacity(0.3)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(width: 6, height: 6,
+                              decoration: BoxDecoration(
+                                color: _statusColor(project.statusType),
+                                shape: BoxShape.circle,
+                                boxShadow: [BoxShadow(color: _statusColor(project.statusType).withOpacity(0.5), blurRadius: 3)],
+                              )),
+                            const SizedBox(width: 6),
+                            Flexible(child: Text(project.status, style: TextStyle(fontSize: 11, color: _statusColor(project.statusType), fontWeight: FontWeight.w500), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                          ],
+                        ),
+                      ),
+                    )
+                  else
+                    Text(project.lastMessage, style: TextStyle(fontSize: 13, color: textDimColor, decoration: project.isArchived ? TextDecoration.lineThrough : null), maxLines: 1, overflow: TextOverflow.ellipsis),
                 ],
               ),
             ),
