@@ -13,6 +13,7 @@ import '../../app/app.dart';
 import '../../core/commands/command_library.dart';
 import '../../core/security/security_service.dart';
 import '../../core/security/bot_protector.dart';
+import '../../core/backend/backend_adapter.dart';
 import '../../core/local/local_backend.dart';
 import '../../core/utils/photo_picker_helper.dart';
 
@@ -89,7 +90,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         _projectApiKey = (p['api_key'] as String?) ?? '';
         _backendUrl = (p['backend_url'] as String?) ?? '';
         _projectColor = colors[hash.abs() % colors.length];
-        _backendType = _backendUrl.contains('supabase') ? 'supabase' : 'generic';
+        _backendType = BackendAdapter.detect(_backendUrl, null).name;
         _projectImageBytes = imageBytes;
       });
     }
@@ -936,9 +937,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   }
 
   void _showQRCode() {
-    final security = SecurityService();
-    final inviteCode = security.encrypt('project:${widget.projectId}:invite');
-    final inviteLink = 'connectflow://invite/$inviteCode';
+    final inviteLink = 'prone://invite/${widget.projectId}';
 
     showModalBottomSheet(
       context: context,
@@ -959,11 +958,14 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
               children: [
                 Container(width: 40, height: 4, decoration: BoxDecoration(color: ThemeHelper.borderLight(context), borderRadius: BorderRadius.circular(2))),
                 const SizedBox(height: 20),
-                Text('QR Code d\'invitation', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: ThemeHelper.text(context))),
+                Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  SvgPicture.asset('assets/icons/qr_code.svg', width: 20, height: 20, colorFilter: ColorFilter.mode(AppColors.primary, BlendMode.srcIn)),
+                  const SizedBox(width: 8),
+                  Text('QR Code Partage', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: ThemeHelper.text(context))),
+                ]),
                 const SizedBox(height: 8),
-                Text('Scannez pour rejoindre le projet', style: TextStyle(fontSize: 13, color: ThemeHelper.textDim(context))),
+                Text('Scannez pour intégrer ce projet', style: TextStyle(fontSize: 13, color: ThemeHelper.textDim(context))),
                 const SizedBox(height: 24),
-                // QR Code
                 Container(
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
@@ -980,29 +982,27 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                     dataModuleStyle: const QrDataModuleStyle(color: Color(0xFF181818)),
                   ),
                 ),
-                const SizedBox(height: 20),
-                // Invite code display
+                const SizedBox(height: 16),
                 Container(
                   width: double.infinity,
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(12), border: Border.all(color: ThemeHelper.borderLight(context))),
                   child: Column(
                     children: [
-                      Text('Code d\'invitation', style: TextStyle(fontSize: 11, color: ThemeHelper.textDim(context))),
+                      Text('Lien d\'invitation', style: TextStyle(fontSize: 11, color: ThemeHelper.textDim(context))),
                       const SizedBox(height: 4),
-                      Text(inviteCode, style: const TextStyle(fontSize: 12, color: AppColors.primary, fontFamily: 'monospace'), textAlign: TextAlign.center),
+                      Text(inviteLink, style: const TextStyle(fontSize: 12, color: AppColors.primary, fontFamily: 'monospace'), textAlign: TextAlign.center),
                     ],
                   ),
                 ),
                 const SizedBox(height: 16),
-                // Action buttons
                 Row(
                   children: [
                     Expanded(
                       child: GestureDetector(
                         onTap: () {
-                          Navigator.pop(context);
-                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Code copié !'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                          Clipboard.setData(ClipboardData(text: inviteLink));
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Lien copié !'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
                         },
                         child: Container(
                           padding: const EdgeInsets.symmetric(vertical: 14),
@@ -1672,46 +1672,22 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
 
   Future<String> _checkBackendStatus() async {
     if (_backendUrl.isEmpty) return '⚠️ Aucun backend configuré.';
-    try {
-      final dio = Dio();
-      final headers = <String, dynamic>{};
-      if (_backendType == 'supabase' && _projectApiKey.isNotEmpty) {
-        headers['apikey'] = _projectApiKey;
-        headers['Authorization'] = 'Bearer $_projectApiKey';
-      }
-      final url = _backendType == 'supabase' ? '$_backendUrl/rest/v1/?limit=1' : _backendUrl;
-      final resp = await dio.get(url, options: Options(headers: headers, receiveTimeout: const Duration(seconds: 10)));
-      return '✅ Backend connecté!\n\nURL: $_backendUrl\nType: $_backendType\nStatus: ${resp.statusCode}\n\nLe backend est opérationnel.';
-    } on DioException catch (e) {
-      return '❌ Backend inaccessible\n\nURL: $_backendUrl\nErreur: ${e.message}\n\nVérifiez l\'URL et la connexion.';
-    }
+    final result = await BackendAdapter.check(_backendUrl, _projectApiKey, type: _backendType);
+    return result.message;
   }
 
   Future<String> _listTables() async {
     if (_backendUrl.isEmpty) return '⚠️ Aucun backend configuré.';
-    if (_backendType != 'supabase') return 'ℹ️ Listage des tables disponible uniquement pour Supabase.';
     try {
-      final dio = Dio();
-      final headers = <String, dynamic>{
-        'apikey': _projectApiKey,
-        'Authorization': 'Bearer $_projectApiKey',
-      };
-      // Try common Supabase tables
-      final tables = ['produits', 'parametres_boutique', 'orders', 'users', 'profiles', 'categories'];
-      final found = <String>[];
-      for (final table in tables) {
-        try {
-          final resp = await dio.get('$_backendUrl/rest/v1/$table?select=id&limit=1',
-            options: Options(headers: headers, receiveTimeout: const Duration(seconds: 5)));
-          if (resp.statusCode == 200) {
-            found.add(table);
-          }
-        } catch (_) {}
+      final tables = await BackendAdapter.listTables(_backendUrl, _projectApiKey, type: _backendType);
+      if (tables.isEmpty) return 'ℹ️ Aucune table/endpoint détecté.\n\nLe backend pourrait ne pas exposer de tables accessibles.';
+      final buffer = StringBuffer('📋 Tables/Endpoints détectés:\n\n');
+      for (final t in tables) {
+        buffer.writeln('  • $t');
       }
-      if (found.isEmpty) return 'ℹ️ Aucune table accessible avec cette API key.\n\nVérifiez les permissions Supabase.';
-      return '📋 Tables disponibles:\n\n${found.map((t) => '• $t').join('\n')}\n\n💡 Essayez: GET /$found.first?select=*';
+      return buffer.toString();
     } catch (e) {
-      return '❌ Erreur: $e';
+      return '❌ Erreur lors du listage: $e';
     }
   }
 }

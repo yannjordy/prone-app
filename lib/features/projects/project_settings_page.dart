@@ -625,7 +625,7 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
   }
 
   void _showQRInvite(Color surfaceColor, Color borderColor, Color textColor, Color textDimColor) {
-    final inviteLink = 'prone://invite/\${widget.projectId}';
+    final inviteLink = 'prone://invite/${widget.projectId}';
     showModalBottomSheet(
       context: context, backgroundColor: Colors.transparent, useRootNavigator: true, isScrollControlled: true,
       builder: (ctx) => ClipRRect(
@@ -640,9 +640,13 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
               children: [
                 Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: borderColor, borderRadius: BorderRadius.circular(2)))),
                 const SizedBox(height: 20),
-                Text('QR Code d\'invitation', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
+                Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  SvgPicture.asset('assets/icons/qr_code.svg', width: 20, height: 20, colorFilter: ColorFilter.mode(AppColors.primary, BlendMode.srcIn)),
+                  const SizedBox(width: 8),
+                  Text('QR Code Partage', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
+                ]),
                 const SizedBox(height: 8),
-                Text('Scannez pour rejoindre le projet', style: TextStyle(fontSize: 13, color: textDimColor)),
+                Text('Scannez pour intégrer ce projet', style: TextStyle(fontSize: 13, color: textDimColor)),
                 const SizedBox(height: 24),
                 Container(
                   padding: const EdgeInsets.all(16),
@@ -667,7 +671,7 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
                 GestureDetector(
                   onTap: () {
                     Clipboard.setData(ClipboardData(text: inviteLink));
-                    ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: const Text('Lien copie'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                    ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: const Text('Lien copié'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
                   },
                   child: Container(width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: ThemeHelper.bg(ctx), borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)), child: Center(child: Text('Copier le lien', style: TextStyle(color: textColor, fontSize: 14, fontWeight: FontWeight.w600)))),
                 ),

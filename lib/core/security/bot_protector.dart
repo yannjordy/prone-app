@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 import 'package:dio/dio.dart';
+import '../backend/backend_adapter.dart';
 
 enum AlertLevel { info, warning, error, critical, offline }
 
@@ -28,6 +29,8 @@ class BotProtector {
   final List<int> _errorCodes = [];
   int _requestCount = 0;
   int _consecutiveErrors = 0;
+  bool _hasSentOfflineAlert = false;
+  bool _hasSentPanneAlert = false;
   DateTime? _lastHealthyCheck;
   bool _isBackendOnline = true;
   String _lastError = '';
@@ -62,21 +65,7 @@ class BotProtector {
 
     try {
       final startTime = DateTime.now();
-      String url = backendUrl.replaceAll(RegExp(r'/+$'), '');
-
-      if (backendType == 'supabase') {
-        url = '$url/rest/v1/?select=id&limit=1';
-      }
-
-      final headers = <String, dynamic>{};
-      if (backendType == 'supabase' && apiKey.isNotEmpty) {
-        headers['apikey'] = apiKey;
-        headers['Authorization'] = 'Bearer $apiKey';
-      } else if (apiKey.isNotEmpty) {
-        headers['Authorization'] = 'Bearer $apiKey';
-      }
-
-      final response = await _dio.get(url, options: Options(headers: headers, receiveTimeout: const Duration(seconds: 10)));
+      final result = await BackendAdapter.check(backendUrl, apiKey, type: backendType);
       final responseTime = DateTime.now().difference(startTime).inMilliseconds.toDouble();
 
       _responseTimes.add(responseTime);
@@ -84,62 +73,41 @@ class BotProtector {
 
       _requestCount++;
       final wasOffline = !_isBackendOnline;
-      _isBackendOnline = true;
+      _isBackendOnline = result.online;
       _consecutiveErrors = 0;
+      _hasSentOfflineAlert = false;
+      _hasSentPanneAlert = false;
       _lastHealthyCheck = DateTime.now();
+
+      if (!result.online) {
+        _consecutiveErrors++;
+        _isBackendOnline = false;
+        _lastError = result.message;
+        if (wasOffline && !_hasSentOfflineAlert) {
+          _hasSentOfflineAlert = true;
+          _hasSentPanneAlert = false;
+          onAlert(SecurityAlert(title: 'Backend hors ligne', message: 'Le backend ne répond plus.', level: AlertLevel.offline, details: result.message));
+        }
+        if (_consecutiveErrors >= 3 && !_hasSentPanneAlert) {
+          _hasSentPanneAlert = true;
+          onAlert(SecurityAlert(title: 'Panne confirmée', message: 'Backend indisponible depuis ${_consecutiveErrors * 45}s.', level: AlertLevel.critical, details: result.message));
+        }
+        return;
+      }
 
       // Backend came back online
       if (wasOffline) {
-        onAlert(SecurityAlert(
-          title: 'Backend restauré',
-          message: 'Le backend est de nouveau en ligne après une interruption.',
-          level: AlertLevel.info,
-        ));
+        onAlert(SecurityAlert(title: 'Backend restauré', message: 'Le backend est de nouveau en ligne.', level: AlertLevel.info));
       }
 
       // Slow response warning
       if (responseTime > 3000) {
-        onAlert(SecurityAlert(
-          title: 'Réponse lente détectée',
-          message: 'Le backend répond en ${responseTime}ms (seuil: 3000ms).',
-          level: AlertLevel.warning,
-          details: 'Temps de réponse moyen: ${_avgResponseTime}ms',
-        ));
+        onAlert(SecurityAlert(title: 'Réponse lente', message: 'Le backend répond en ${responseTime}ms (seuil: 3000ms).', level: AlertLevel.warning));
       }
 
       // Very slow response
       if (responseTime > 8000) {
-        onAlert(SecurityAlert(
-          title: 'Backend en dégradation',
-          message: 'Temps de réponse critique: ${responseTime}ms. Performances severely dégradées.',
-          level: AlertLevel.error,
-          details: 'Le backend pourrait être surchargé ou rencontre des problèmes réseau.',
-        ));
-      }
-    } on DioException catch (e) {
-      _consecutiveErrors++;
-      final wasOnline = _isBackendOnline;
-      _isBackendOnline = false;
-      _lastError = _getDioErrorMessage(e);
-
-      // Backend went offline
-      if (wasOnline) {
-        onAlert(SecurityAlert(
-          title: 'Backend hors ligne',
-          message: 'Le backend ne répond plus. Connexion perdue.',
-          level: AlertLevel.offline,
-          details: 'Erreur: $_lastError',
-        ));
-      }
-
-      // Repeated failures - escalation
-      if (_consecutiveErrors >= 3) {
-        onAlert(SecurityAlert(
-          title: 'Panne confirmée',
-          message: 'Le backend est indisponible depuis ${_consecutiveErrors * 45}s.',
-          level: AlertLevel.critical,
-          details: 'Dernière erreur: $_lastError\nVérifiez les logs du serveur.',
-        ));
+        onAlert(SecurityAlert(title: 'Backend dégradé', message: 'Temps de réponse critique: ${responseTime}ms.', level: AlertLevel.error));
       }
     } catch (e) {
       _consecutiveErrors++;

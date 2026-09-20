@@ -1,13 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:http/http.dart' as http;
 import 'dart:typed_data';
 import 'dart:convert';
 import 'dart:ui';
+import 'dart:math';
 import '../../app/app.dart';
 import '../../core/local/local_backend.dart';
+import '../../core/backend/backend_adapter.dart';
+import 'qr_scanner_page.dart';
 
 class ProjectListScreen extends StatefulWidget {
   const ProjectListScreen({super.key});
@@ -32,6 +35,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
   final _renameController = TextEditingController();
   final _apiKeyController = TextEditingController();
   final _backendUrlController = TextEditingController();
+  String _selectedBackendType = 'auto';
   final _notifService = NotificationService();
   final _backend = LocalBackend();
   List<_Project> _projects = [];
@@ -261,6 +265,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
                       _MenuItem(icon: 'plus.svg', label: 'Nouveau projet', onTap: () {
                         setState(() { _showMenu = false; _showCreateForm = true; });
                       }),
+                      _MenuItem(icon: 'qr_code.svg', label: 'Scanner QR Code', onTap: () { setState(() { _showMenu = false; }); _showScanDialog(); }),
                       _MenuItem(icon: 'search.svg', label: 'Rechercher', onTap: () { setState(() { _showMenu = false; _showSearch = true; }); }),
                       Divider(color: ThemeHelper.borderLight(context), height: 1),
                       _MenuItem(icon: 'grid.svg', label: _isGridView ? 'Vue liste' : 'Vue grille', onTap: () { final v = !_isGridView; _saveViewPreference(v); setState(() { _showMenu = false; _isGridView = v; }); }),
@@ -693,6 +698,45 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
     );
   }
 
+  Widget _buildBackendTypeSelector(Color textColor, Color textDimColor, Color borderColor) {
+    final types = [
+      {'value': 'auto', 'label': 'Auto-detect'},
+      {'value': 'supabase', 'label': 'Supabase'},
+      {'value': 'firebase', 'label': 'Firebase'},
+      {'value': 'node', 'label': 'Node.js'},
+      {'value': 'python', 'label': 'Python'},
+      {'value': 'java', 'label': 'Java'},
+      {'value': 'nextjs', 'label': 'Next.js'},
+      {'value': 'express', 'label': 'Express.js'},
+      {'value': 'nest', 'label': 'NestJS'},
+      {'value': 'fastapi', 'label': 'FastAPI'},
+      {'value': 'django', 'label': 'Django'},
+      {'value': 'flask', 'label': 'Flask'},
+      {'value': 'generic', 'label': 'Autre API'},
+    ];
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+      decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(14), border: Border.all(color: borderColor)),
+      child: Row(
+        children: [
+          SvgPicture.asset('assets/icons/connections.svg', width: 16, height: 16, colorFilter: ColorFilter.mode(AppColors.primary, BlendMode.srcIn)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: DropdownButton<String>(
+              value: _selectedBackendType,
+              isExpanded: true,
+              underline: const SizedBox(),
+              dropdownColor: ThemeHelper.surface(context),
+              style: TextStyle(color: textColor, fontSize: 14),
+              items: types.map((t) => DropdownMenuItem(value: t['value'], child: Text(t['label']!))).toList(),
+              onChanged: (v) => setState(() => _selectedBackendType = v ?? 'auto'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildStepFields(Color surfaceColor, Color borderColor, Color textColor, Color textDimColor) {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -708,6 +752,13 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
         _buildInput('Cle API', _apiKeyController, 'sk-xxxxxxxxxxxxxxxx', isPassword: true),
         const SizedBox(height: 12),
         _buildInput('URL du Backend', _backendUrlController, 'https://api.monbackend.com'),
+        const SizedBox(height: 4),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: Text('Supabase: https://xxx.supabase.co | Node/Express: https://api.example.com | Python: https://api.example.com', style: TextStyle(fontSize: 11, color: textDimColor.withOpacity(0.6)), maxLines: 2),
+        ),
+        const SizedBox(height: 8),
+        _buildBackendTypeSelector(textColor, textDimColor, borderColor),
         const SizedBox(height: 20),
         Row(
           children: [
@@ -781,32 +832,21 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
     try {
       final url = _backendUrlController.text.trim();
       final key = _apiKeyController.text.trim();
-      bool connected = false;
-
-      if (url.contains('supabase')) {
-        final restUrl = url.replaceAll(RegExp(r'/rest/v1.*'), '');
-        final response = await http.get(
-          Uri.parse('$restUrl/rest/v1/?apikey=$key'),
-          headers: {'apikey': key, 'Authorization': 'Bearer $key'},
-        ).timeout(const Duration(seconds: 8));
-        connected = response.statusCode == 200 || response.statusCode == 404;
-      } else {
-        final response = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 8));
-        connected = response.statusCode >= 200 && response.statusCode < 500;
-      }
+      final type = _selectedBackendType == 'auto' ? null : _selectedBackendType;
+      final result = await BackendAdapter.check(url, key, type: type);
 
       if (!mounted) return;
-      if (connected) {
+      if (result.online) {
         _backendVerified = true;
         _createProject();
       } else {
         setState(() { _createFormStep = 0; _isVerifying = false; });
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Backend non accessible'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(result.message), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
       }
     } catch (e) {
       if (!mounted) return;
       setState(() { _createFormStep = 0; _isVerifying = false; });
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur de connexion: $e'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur: $e'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
     }
   }
 
@@ -834,6 +874,176 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur: $e'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
     }
+  }
+
+  void _showScanDialog() {
+    setState(() => _showMenu = false);
+    Navigator.of(context).push(PageRouteBuilder(
+      transitionDuration: const Duration(milliseconds: 400),
+      reverseTransitionDuration: const Duration(milliseconds: 300),
+      pageBuilder: (ctx, animation, secondaryAnimation) => createQrScanner(
+        onScanned: (link) => _runImportAnimation(link),
+      ),
+      transitionsBuilder: (ctx, animation, secondaryAnimation, child) {
+        final tween = Tween(begin: const Offset(0, 1), end: Offset.zero).chain(CurveTween(curve: Curves.easeOutCubic));
+        return SlideTransition(position: animation.drive(tween), child: child);
+      },
+    ));
+  }
+
+  void _runImportAnimation(String link) {
+    final surfaceColor = ThemeHelper.surface(context);
+    final borderColor = ThemeHelper.borderLight(context);
+    final textColor = ThemeHelper.text(context);
+    final textDimColor = ThemeHelper.textDim(context);
+    final projectId = link.replaceFirst('prone://invite/', '');
+
+    showDialog(
+      context: context,
+      barrierColor: Colors.black.withOpacity(0.5),
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(24),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+            child: Container(
+              padding: const EdgeInsets.all(32),
+              decoration: BoxDecoration(
+                color: surfaceColor.withOpacity(0.95),
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: borderColor),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Animated transfer icon
+                  SizedBox(
+                    width: 120,
+                    height: 120,
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        TweenAnimationBuilder<double>(
+                          tween: Tween(begin: 0.0, end: 1.0),
+                          duration: const Duration(milliseconds: 2000),
+                          builder: (context, value, child) {
+                            return Transform.rotate(
+                              angle: value * 2 * 3.14159,
+                              child: Container(
+                                width: 120, height: 120,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  border: Border.all(color: AppColors.primary.withOpacity(0.15), width: 2),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                        TweenAnimationBuilder<double>(
+                          tween: Tween(begin: 0.0, end: 1.0),
+                          duration: const Duration(milliseconds: 2500),
+                          builder: (context, value, child) {
+                            return Transform.rotate(
+                              angle: value * 2 * 3.14159,
+                              child: SizedBox(
+                                width: 100, height: 100,
+                                child: CustomPaint(painter: _SpinnerPainter(progress: value)),
+                              ),
+                            );
+                          },
+                        ),
+                        Container(
+                          width: 56, height: 56,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            gradient: AppColors.gradient,
+                            boxShadow: [BoxShadow(color: AppColors.primary.withOpacity(0.4), blurRadius: 20)],
+                          ),
+                          child: SvgPicture.asset('assets/icons/download.svg', width: 24, height: 24, colorFilter: ColorFilter.mode(Colors.white, BlendMode.srcIn)),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  Text('Intégration en cours...', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
+                  const SizedBox(height: 8),
+                  Text('Transfert des données du projet', style: TextStyle(fontSize: 13, color: textDimColor)),
+                  const SizedBox(height: 20),
+                  TweenAnimationBuilder<double>(
+                    tween: Tween(begin: 0.0, end: 1.0),
+                    duration: const Duration(milliseconds: 2800),
+                    onEnd: () async {
+                      await _doImport(projectId);
+                      if (ctx.mounted) {
+                        Navigator.pop(ctx);
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                          content: const Text('Projet intégré avec succès !'),
+                          backgroundColor: AppColors.success,
+                          behavior: SnackBarBehavior.floating,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ));
+                      }
+                    },
+                    builder: (context, value, child) {
+                      return Column(
+                        children: [
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(4),
+                            child: LinearProgressIndicator(
+                              value: value,
+                              backgroundColor: borderColor,
+                              valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary),
+                              minHeight: 4,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text('${(value * 100).toInt()}%', style: TextStyle(fontSize: 12, color: AppColors.primary, fontWeight: FontWeight.w600)),
+                        ],
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _doImport(String projectId) async {
+    final projects = await _backend.getProjects();
+    final sourceProject = projects.where((p) => p['id'] == projectId).toList();
+
+    String projectName = 'Projet importé';
+    String projectDesc = '';
+    String apiKey = '';
+    String backendUrl = '';
+    String photo = '';
+
+    if (sourceProject.isNotEmpty) {
+      final p = sourceProject.first;
+      projectName = p['name'] ?? 'Projet importé';
+      projectDesc = p['description'] ?? '';
+      apiKey = p['api_key'] ?? '';
+      backendUrl = p['backend_url'] ?? '';
+      photo = p['photo'] ?? '';
+    } else {
+      projectDesc = 'Intégré via QR Code';
+    }
+
+    await _backend.createProject(projectName, projectDesc,
+      apiKey: apiKey, backendUrl: backendUrl, photo: photo,
+    );
+
+    final orgs = await _backend.getOrganizations();
+    if (orgs.isNotEmpty) {
+      await _backend.addMember(orgs.first['id'], 'Utilisateur local', 'local@prone.app', 'viewer');
+    }
+
+    _loadProjects();
+    if (mounted) setState(() {});
   }
 }
 
@@ -1087,4 +1297,91 @@ class _ProjectGridCard extends StatelessWidget {
       ),
     );
   }
+}
+
+class _SpinnerPainter extends CustomPainter {
+  final double progress;
+  _SpinnerPainter({required this.progress});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2 - 8;
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round;
+
+    for (int i = 0; i < 8; i++) {
+      final angle = (i * 3.14159 / 4) + (progress * 2 * 3.14159);
+      final opacity = (1.0 - (i / 8));
+      paint.color = AppColors.primary.withOpacity(opacity * 0.8);
+      final start = Offset(
+        center.dx + (radius - 10) * cos(angle),
+        center.dy + (radius - 10) * sin(angle),
+      );
+      final end = Offset(
+        center.dx + radius * cos(angle),
+        center.dy + radius * sin(angle),
+      );
+      canvas.drawLine(start, end, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _SpinnerPainter oldDelegate) => true;
+}
+
+class _ScanOverlayPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round;
+
+    final cornerLen = size.width * 0.15;
+    final r = 20.0;
+
+    // Top-left corner
+    paint.color = AppColors.primary;
+    final tl = Path()
+      ..moveTo(0, r)
+      ..lineTo(0, 0)
+      ..lineTo(r, 0);
+    canvas.drawPath(tl, paint);
+
+    // Top-right corner
+    final tr = Path()
+      ..moveTo(size.width - r, 0)
+      ..lineTo(size.width, 0)
+      ..lineTo(size.width, r);
+    canvas.drawPath(tr, paint);
+
+    // Bottom-left corner
+    final bl = Path()
+      ..moveTo(0, size.height - r)
+      ..lineTo(0, size.height)
+      ..lineTo(r, size.height);
+    canvas.drawPath(bl, paint);
+
+    // Bottom-right corner
+    final br = Path()
+      ..moveTo(size.width - r, size.height)
+      ..lineTo(size.width, size.height)
+      ..lineTo(size.width, size.height - r);
+    canvas.drawPath(br, paint);
+
+    // Center scan line
+    final linePaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..shader = LinearGradient(
+        colors: [AppColors.primary.withOpacity(0.0), AppColors.primary.withOpacity(0.8), AppColors.primary.withOpacity(0.0)],
+      ).createShader(Rect.fromLTWH(20, size.height / 2 - 1, size.width - 40, 2));
+    canvas.drawLine(Offset(20, size.height / 2), Offset(size.width - 20, size.height / 2), linePaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
