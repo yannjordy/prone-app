@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'dart:ui';
 import '../../app/app.dart';
 import '../../core/local/local_backend.dart';
+import '../../core/backend/backend_adapter.dart';
 
 class ProjectWorkflowsPage extends StatefulWidget {
   final String projectId;
@@ -16,6 +17,9 @@ class ProjectWorkflowsPage extends StatefulWidget {
 class _ProjectWorkflowsPageState extends State<ProjectWorkflowsPage> {
   final _backend = LocalBackend();
   List<Map<String, dynamic>> _workflows = [];
+  String _backendUrl = '';
+  String _apiKey = '';
+  String _backendType = 'generic';
 
   @override
   void initState() {
@@ -24,12 +28,15 @@ class _ProjectWorkflowsPageState extends State<ProjectWorkflowsPage> {
   }
 
   Future<void> _loadWorkflows() async {
-    var wfs = await _backend.getWorkflows(widget.projectId);
-    if (wfs.isEmpty) {
-      await _backend.createWorkflow(widget.projectId, 'User Registration', 'validate -> create -> email');
-      await _backend.createWorkflow(widget.projectId, 'Order Processing', 'validate -> payment -> notify');
-      wfs = await _backend.getWorkflows(widget.projectId);
+    final projects = await _backend.getProjects();
+    final match = projects.where((p) => p['id'] == widget.projectId).toList();
+    if (match.isNotEmpty) {
+      final p = match.first;
+      _backendUrl = (p['backend_url'] as String?) ?? '';
+      _apiKey = (p['api_key'] as String?) ?? '';
+      _backendType = BackendAdapter.detect(_backendUrl, null).name;
     }
+    final wfs = await _backend.getWorkflows(widget.projectId);
     if (mounted) setState(() => _workflows = wfs);
   }
 
@@ -138,13 +145,18 @@ class _ProjectWorkflowsPageState extends State<ProjectWorkflowsPage> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),
     );
-    await _backend.addExecution(widget.projectId, name, 'success', duration: '${(name.length * 137) % 3000}ms');
-    await _backend.addLog(widget.projectId, 'info', 'Workflow "$name" execute avec succes');
+    final sw = Stopwatch()..start();
+    final res = await BackendAdapter.check(_backendUrl, _apiKey, type: _backendType);
+    sw.stop();
+    final ms = sw.elapsedMilliseconds;
+    await _backend.addExecution(widget.projectId, name, res.online ? 'success' : 'failed', duration: '$ms ms');
+    await _backend.addLog(widget.projectId, res.online ? 'info' : 'error',
+        'Workflow "$name" exécuté — backend ${res.online ? "en ligne" : "injoignable"} ($ms ms)');
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('"$name" exécuté avec succès'),
-        backgroundColor: AppColors.success,
+        content: Text(res.online ? '"$name" terminé en $ms ms' : '"$name" échoué — backend injoignable'),
+        backgroundColor: res.online ? AppColors.success : AppColors.error,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),

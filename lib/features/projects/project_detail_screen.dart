@@ -11,11 +11,13 @@ import 'dart:ui';
 import 'dart:async';
 import '../../app/app.dart';
 import '../../core/commands/command_library.dart';
-import '../../core/security/security_service.dart';
 import '../../core/security/bot_protector.dart';
 import '../../core/backend/backend_adapter.dart';
 import '../../core/local/local_backend.dart';
 import '../../core/utils/photo_picker_helper.dart';
+import '../../core/offline/offline_queue.dart';
+import '../../core/notifications/error_store.dart';
+import '../../core/backend/request_log.dart';
 
 class ProjectDetailScreen extends StatefulWidget {
   final String projectId;
@@ -27,6 +29,7 @@ class ProjectDetailScreen extends StatefulWidget {
 
 class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   final _controller = TextEditingController();
+  final _commandSearchController = TextEditingController();
   final _scrollController = ScrollController();
   final List<_ChatMessage> _messages = [];
   bool _showCommands = false;
@@ -42,6 +45,10 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   String _projectInitials = 'P';
   Color _projectColor = AppColors.primary;
   bool _isConnected = true;
+  bool _lastCmdOffline = false;
+  int _unreadAlerts = 0;
+  int _pendingCommands = 0;
+  String _commandQuery = '';
   String _projectApiKey = '';
   String _backendUrl = '';
   String _backendType = 'generic';
@@ -67,6 +74,130 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       }
     });
     _loadProjectData();
+    _refreshAlertCount();
+    _refreshPendingCount();
+  }
+
+  Future<void> _refreshAlertCount() async {
+    final n = await BackendErrorStore.instance.unreadCount(widget.projectId);
+    if (mounted) setState(() => _unreadAlerts = n);
+  }
+
+  Future<void> _refreshPendingCount() async {
+    final items = await OfflineQueue.instance.pending(widget.projectId);
+    if (mounted) setState(() => _pendingCommands = items.length);
+  }
+
+  void _showAlertsSheet() {
+    final surfaceColor = ThemeHelper.surface(context);
+    final borderColor = ThemeHelper.borderLight(context);
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) => ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+          child: Container(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.72),
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(color: surfaceColor.withOpacity(0.97), border: Border(top: BorderSide(color: borderColor))),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: borderColor, borderRadius: BorderRadius.circular(2)))),
+              const SizedBox(height: 18),
+              Row(children: [
+                SvgPicture.asset('assets/icons/bell.svg', width: 18, height: 18, colorFilter: const ColorFilter.mode(AppColors.error, BlendMode.srcIn)),
+                const SizedBox(width: 10),
+                Text('Alertes backend', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: ThemeHelper.text(context))),
+                const Spacer(),
+                GestureDetector(
+                  onTap: () async {
+                    await BackendErrorStore.instance.clear(widget.projectId);
+                    if (ctx.mounted) Navigator.pop(ctx);
+                    _refreshAlertCount();
+                  },
+                  child: SvgPicture.asset('assets/icons/trash.svg', width: 17, height: 17, colorFilter: ColorFilter.mode(ThemeHelper.textDim(context), BlendMode.srcIn)),
+                ),
+              ]),
+              const SizedBox(height: 14),
+              Flexible(child: _buildAlertsList(ctx)),
+            ]),
+          ),
+        ),
+      ),
+    ).then((_) {
+      BackendErrorStore.instance.markAllRead(widget.projectId);
+      _refreshAlertCount();
+    });
+  }
+
+  Widget _buildAlertsList(BuildContext ctx) {
+    return FutureBuilder<List<BackendErrorEntry>>(
+      future: BackendErrorStore.instance.recent(widget.projectId),
+      builder: (context, snap) {
+        final items = snap.data ?? const <BackendErrorEntry>[];
+        if (items.isEmpty) {
+          return Padding(
+            padding: const EdgeInsets.symmetric(vertical: 30),
+            child: Center(
+              child: Column(children: [
+                SvgPicture.asset('assets/icons/check-circle.svg', width: 40, height: 40, colorFilter: const ColorFilter.mode(AppColors.success, BlendMode.srcIn)),
+                const SizedBox(height: 12),
+                Text('Aucune alerte', style: TextStyle(fontSize: 14, color: ThemeHelper.textDim(context))),
+              ]),
+            ),
+          );
+        }
+        return ListView.separated(
+          shrinkWrap: true,
+          itemCount: items.length,
+          separatorBuilder: (_, __) => const SizedBox(height: 8),
+          itemBuilder: (context, i) {
+            final e = items[i];
+            final color = switch (e.level) {
+              ErrorLevel.error => AppColors.error,
+              ErrorLevel.warning => AppColors.warning,
+              ErrorLevel.offline => AppColors.primary,
+            };
+            return Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: color.withOpacity(0.07),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: color.withOpacity(0.25)),
+              ),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                    decoration: BoxDecoration(color: color.withOpacity(0.18), borderRadius: BorderRadius.circular(6)),
+                    child: Text(e.level.name.toUpperCase(), style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: color)),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text(_formatAlertTime(e.at), style: TextStyle(fontSize: 11, color: ThemeHelper.textDim(context)))),
+                ]),
+                const SizedBox(height: 8),
+                Text(e.message, style: TextStyle(fontSize: 13, height: 1.4, color: ThemeHelper.text(context))),
+                if (e.command != null && e.command!.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(e.command!, style: TextStyle(fontSize: 11, color: ThemeHelper.textDim(context), fontFamily: 'monospace')),
+                ],
+              ]),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  String _formatAlertTime(DateTime t) {
+    final now = DateTime.now();
+    final diff = now.difference(t);
+    if (diff.inMinutes < 1) return "a l'instant";
+    if (diff.inMinutes < 60) return 'il y a ${diff.inMinutes} min';
+    if (diff.inHours < 24) return 'il y a ${diff.inHours}h';
+    return '${t.day}/${t.month}/${t.year} ${t.hour}:${t.minute.toString().padLeft(2, '0')}';
   }
 
   Future<void> _loadProjectData() async {
@@ -191,6 +322,14 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         alertTitle: alert.title,
       ));
     });
+    final errorLevel = switch (alert.level) {
+      AlertLevel.offline => ErrorLevel.offline,
+      AlertLevel.info => ErrorLevel.warning,
+      _ => ErrorLevel.error,
+    };
+    BackendErrorStore.instance
+        .record(widget.projectId, '${alert.title} — ${alert.message}', level: errorLevel)
+        .then((_) => _refreshAlertCount());
     if (_scrollController.hasClients) {
       _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
     }
@@ -200,15 +339,22 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   void dispose() {
     _protector.stopMonitoring();
     _controller.dispose();
+    _commandSearchController.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final filteredCommands = _selectedCategory == 'All'
+    var filteredCommands = _selectedCategory == 'All'
         ? CommandLibrary.commands
         : CommandLibrary.commands.where((c) => c.category == _selectedCategory).toList();
+    final q = _commandQuery.trim().toLowerCase().replaceFirst(RegExp(r'^/'), '');
+    if (q.isNotEmpty) {
+      filteredCommands = filteredCommands
+          .where((c) => c.name.toLowerCase().contains(q) || c.description.toLowerCase().contains(q))
+          .toList();
+    }
     final categories = ['All', ...CommandLibrary.commands.map((c) => c.category).toSet()];
 
     return Scaffold(
@@ -270,6 +416,33 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                           ],
                         ),
                       ),
+                      // Backend error alerts
+                      GestureDetector(
+                        onTap: () => _showAlertsSheet(),
+                        child: Container(
+                          width: 36, height: 36,
+                          decoration: BoxDecoration(
+                            color: _unreadAlerts > 0 ? AppColors.error.withOpacity(0.15) : Colors.transparent,
+                            borderRadius: BorderRadius.circular(50),
+                          ),
+                          child: Stack(
+                            alignment: Alignment.center,
+                            children: [
+                              SvgPicture.asset('assets/icons/bell.svg', width: 19, height: 19,
+                                colorFilter: ColorFilter.mode(_unreadAlerts > 0 ? AppColors.error : ThemeHelper.textDim(context), BlendMode.srcIn)),
+                              if (_unreadAlerts > 0)
+                                Positioned(
+                                  right: 4, top: 4,
+                                  child: Container(
+                                    width: 8, height: 8,
+                                    decoration: BoxDecoration(color: AppColors.error, shape: BoxShape.circle, border: Border.all(color: ThemeHelper.surface(context), width: 1.5)),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 4),
                       // 3-dot menu
                       GestureDetector(
                         onTap: () => setState(() => _showSettings = !_showSettings),
@@ -301,10 +474,9 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                   },
                 ),
               ),
-              const SizedBox(height: 80),
+              SizedBox(height: _pendingCommands > 0 && _userRole != 'viewer' ? 128 : 80),
             ],
           ),
-
           // Settings dropdown
           if (_showSettings)
             GestureDetector(
@@ -346,6 +518,14 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                         _SettingsItem(icon: 'monitoring.svg', label: 'Monitoring', onTap: () {
                           setState(() => _showSettings = false);
                           context.go('/projects/${widget.projectId}/monitoring');
+                        }),
+                        _SettingsItem(icon: 'database.svg', label: 'Tables', onTap: () {
+                          setState(() => _showSettings = false);
+                          context.go('/projects/${widget.projectId}/tables');
+                        }),
+                        _SettingsItem(icon: 'bell.svg', label: 'Alertes backend', onTap: () {
+                          setState(() => _showSettings = false);
+                          _showAlertsSheet();
                         }),
                         _SettingsItem(icon: 'logs.svg', label: 'Logs', onTap: () {
                           setState(() => _showSettings = false);
@@ -402,6 +582,42 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                     ),
                     child: Column(
                       children: [
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            height: 40,
+                            decoration: BoxDecoration(
+                              color: ThemeHelper.bg(context).withOpacity(0.7),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: ThemeHelper.borderLight(context)),
+                            ),
+                            child: Row(children: [
+                              SvgPicture.asset('assets/icons/search.svg', width: 15, height: 15,
+                                colorFilter: ColorFilter.mode(ThemeHelper.textDim(context), BlendMode.srcIn)),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: TextField(
+                                  controller: _commandSearchController,
+                                  style: TextStyle(fontSize: 13, color: ThemeHelper.text(context)),
+                                  decoration: InputDecoration(
+                                    hintText: 'Rechercher une commande...',
+                                    border: InputBorder.none,
+                                    isDense: true,
+                                    hintStyle: TextStyle(fontSize: 13, color: ThemeHelper.textDim(context)),
+                                  ),
+                                  onChanged: (v) => setState(() => _commandQuery = v),
+                                ),
+                              ),
+                              if (_commandQuery.isNotEmpty)
+                                GestureDetector(
+                                  onTap: () { _commandSearchController.clear(); setState(() => _commandQuery = ''); },
+                                  child: SvgPicture.asset('assets/icons/x.svg', width: 14, height: 14,
+                                    colorFilter: ColorFilter.mode(ThemeHelper.textDim(context), BlendMode.srcIn)),
+                                ),
+                            ]),
+                          ),
+                        ),
                         Container(
                           height: 44, padding: const EdgeInsets.symmetric(horizontal: 12),
                           child: ListView(
@@ -422,7 +638,16 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                           ),
                         ),
                         Expanded(
-                          child: ListView.builder(
+                          child: filteredCommands.isEmpty
+                              ? Center(
+                                  child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                                    SvgPicture.asset('assets/icons/search.svg', width: 34, height: 34,
+                                      colorFilter: ColorFilter.mode(ThemeHelper.textDim(context), BlendMode.srcIn)),
+                                    const SizedBox(height: 12),
+                                    Text('Aucune commande', style: TextStyle(fontSize: 13, color: ThemeHelper.textDim(context))),
+                                  ]),
+                                )
+                              : ListView.builder(
                             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
                             itemCount: filteredCommands.length,
                             itemBuilder: (context, index) {
@@ -494,6 +719,44 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
               ),
             ),
 
+          // Offline queue chip
+          if (_pendingCommands > 0 && _userRole != 'viewer')
+            Positioned(
+              bottom: 82, left: 16, right: 16,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+                  child: GestureDetector(
+                    onTap: _retryPending,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                      decoration: BoxDecoration(
+                        color: (_isConnected ? AppColors.success : AppColors.warning).withOpacity(0.14),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: (_isConnected ? AppColors.success : AppColors.warning).withOpacity(0.45)),
+                      ),
+                      child: Row(children: [
+                        SvgPicture.asset('assets/icons/warning.svg', width: 15, height: 15,
+                          colorFilter: ColorFilter.mode(_isConnected ? AppColors.success : AppColors.warning, BlendMode.srcIn)),
+                        const SizedBox(width: 9),
+                        Expanded(
+                          child: Text(
+                            _isConnected
+                                ? '$_pendingCommands commande(s) en attente — appuyer pour envoyer'
+                                : 'Hors ligne · $_pendingCommands commande(s) en attente',
+                            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: ThemeHelper.text(context)),
+                          ),
+                        ),
+                        SvgPicture.asset('assets/icons/refresh.svg', width: 15, height: 15,
+                          colorFilter: ColorFilter.mode(_isConnected ? AppColors.success : AppColors.warning, BlendMode.srcIn)),
+                      ]),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
           // Input bar
           if (_userRole != 'viewer')
           Positioned(
@@ -513,7 +776,10 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                   child: Row(
                     children: [
                       GestureDetector(
-                        onTap: () => setState(() => _showCommands = !_showCommands),
+                        onTap: () => setState(() {
+                          _showCommands = !_showCommands;
+                          if (_showCommands) { _commandSearchController.clear(); _commandQuery = ''; }
+                        }),
                         child: Container(
                           width: 40, height: 40,
                           decoration: BoxDecoration(color: _showCommands ? AppColors.primary.withOpacity(0.2) : Colors.transparent, borderRadius: BorderRadius.circular(50)),
@@ -1203,7 +1469,6 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         alertIcon = const Icon(Icons.cloud_off_rounded, size: 14, color: Colors.white54);
         break;
       case MessageLevel.info:
-      default:
         bubbleColor = isSelected
             ? AppColors.primary.withOpacity(0.08)
             : isCurrentUser ? AppColors.primary.withOpacity(0.15) : ThemeHelper.surface(context);
@@ -1443,9 +1708,6 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
 
   void _showMessageOptions(_ChatMessage msg, Offset position) {
     final surfaceColor = ThemeHelper.surface(context);
-    final borderColor = ThemeHelper.borderLight(context);
-    final textColor = ThemeHelper.text(context);
-    final textDimColor = ThemeHelper.textDim(context);
 
     showGeneralDialog(
       context: context,
@@ -1567,6 +1829,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   }
 
   Future<String> _executeRealCommand(String command) async {
+    _lastCmdOffline = false;
     if (_backendUrl.isEmpty) {
       _updateProjectStatus('Backend non configure', 'warning');
       return '⚠️ Aucun backend configuré.\nConnectez un backend dans les paramètres du projet.';
@@ -1590,11 +1853,11 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         return await _fetchTable('orders', limit: 50);
       } else if (cmd == 'count') {
         if (args.isEmpty) return '❌ Usage: /count <table>';
-        return await _fetchTable(args[0], limit: 1000, countOnly: true);
+        return await _countTable(args[0]);
       } else if (cmd == 'last') {
         if (args.isEmpty) return '❌ Usage: /last <table> [limit]';
         final limit = args.length > 1 ? int.tryParse(args[1]) ?? 5 : 5;
-        return await _fetchTable(args[0], limit: limit);
+        return await _fetchTable(args[0], limit: limit.clamp(1, 100));
       } else if (cmd == 'search') {
         if (args.length < 3) return '❌ Usage: /search <table> <champ> <valeur>';
         return await _searchTable(args[0], args[1], args.sublist(2).join(' '));
@@ -1607,12 +1870,21 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       }
       return '❌ Commande inconnue: "$command"\n\nTapez /help pour les commandes disponibles.';
     } catch (e) {
+      final offline = e is DioException && BackendAdapter.isOfflineError(e);
+      _lastCmdOffline = offline;
+      if (offline) {
+        setState(() => _isConnected = false);
+        await BackendErrorStore.instance.record(widget.projectId, 'Backend inaccessible — connexion impossible', command: command, level: ErrorLevel.offline);
+        return '⚠️ Hors ligne — le backend ne repond pas.\n\nLa commande est mise en file d\'attente et sera renvoyee automatiquement.';
+      }
       _updateProjectStatus('Erreur: $e', 'error');
+      await BackendErrorStore.instance.record(widget.projectId, '$e', command: command, level: ErrorLevel.error);
+      _refreshAlertCount();
       return '❌ Erreur backend: $e';
     }
   }
 
-  Future<String> _fetchTable(String table, {int limit = 50, bool countOnly = false}) async {
+  Future<String> _fetchTable(String table, {int limit = 50}) async {
     final clean = _backendUrl.replaceAll(RegExp(r'/+$'), '');
     String url;
     Map<String, String> headers;
@@ -1638,7 +1910,6 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
 
     final data = resp.data;
     if (data is List) {
-      if (countOnly) return '🔢 Nombre de lignes dans "$table": ${data.length}';
       if (data.isEmpty) return 'ℹ️ Table "$table" vide ou inexistante.';
       final buf = StringBuffer('📋 **$table** (${data.length} entrées):\n\n');
       for (var i = 0; i < data.length && i < limit; i++) {
@@ -1650,44 +1921,73 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       }
       return buf.toString();
     } else if (data is Map) {
-      if (countOnly) return '🔢 Table "$table": réponse non listée';
       return '📋 **$table**:\n\n${_formatJsonMap(data)}';
     }
     return 'ℹ️ Réponse inattendue de $table';
   }
 
-  Future<String> _searchTable(String table, String field, String value) async {
-    final clean = _backendUrl.replaceAll(RegExp(r'/+$'), '');
-    String url;
-    Map<String, String> headers;
-
-    if (_backendType == 'supabase') {
-      url = '$clean/rest/v1/$table?$field=eq.$value&select=*';
-      headers = {'apikey': _projectApiKey, 'Authorization': 'Bearer $_projectApiKey'};
-    } else {
-      url = '$clean/$table?$field=$value';
-      headers = {};
-      if (_projectApiKey.isNotEmpty) headers['Authorization'] = 'Bearer $_projectApiKey';
+  Future<String> _countTable(String table) async {
+    final res = await BackendAdapter.countRows(_backendUrl, _projectApiKey, table, type: _backendType);
+    if (!res.ok) {
+      if (res.offline) {
+        _lastCmdOffline = true;
+        return '⚠️ Hors ligne — impossible de compter "$table".';
+      }
+      return '❌ Erreur lors du comptage de "$table": ${res.error}';
     }
+    final n = res.count!;
+    final flag = res.approximate ? ' (minimum, plafonne a 1000)' : '';
+    final cached = res.fromCache ? '\n⏱️ valeur en cache (< 60s)' : '';
+    return '🔢 Nombre de lignes dans "$table": ${_formatNumber(n)}$flag$cached';
+  }
 
-    final dio = Dio();
-    final resp = await dio.get(url,
-      options: Options(headers: headers, receiveTimeout: const Duration(seconds: 10), validateStatus: (s) => s != null && s < 500),
+  String _formatNumber(int n) {
+    final s = n.toString();
+    final buf = StringBuffer();
+    for (var i = 0; i < s.length; i++) {
+      if (i > 0 && (s.length - i) % 3 == 0) buf.write(' ');
+      buf.write(s[i]);
+    }
+    return buf.toString();
+  }
+
+  Future<String> _searchTable(String table, String field, String value, {int limit = 25}) async {
+    final res = await BackendAdapter.fetchRows(
+      _backendUrl,
+      _projectApiKey,
+      table,
+      limit: limit,
+      offset: 0,
+      type: _backendType,
+      searchField: field,
+      searchValue: value,
     );
 
-    if (resp.statusCode != 200) return '❌ Erreur ${resp.statusCode} pour $field="$value" dans $table';
-    final data = resp.data;
-    if (data is List && data.isNotEmpty) {
-      final buf = StringBuffer('🔍 Résultats pour $field="$value" dans $table (${data.length}):\n\n');
-      for (final item in data) {
-        if (item is Map) buf.writeln(_formatJsonList([item]));
-        buf.writeln();
+    if (!res.ok) {
+      if (res.offline) {
+        _lastCmdOffline = true;
+        return '⚠️ Hors ligne — recherche impossible dans "$table".';
       }
-      return buf.toString();
-    } else if (data is List && data.isEmpty) {
-      return '🔍 Aucun résultat pour $field="$value" dans $table';
+      return '❌ Erreur ${res.error} pour $field="$value" dans $table';
     }
-    return '🔍 Réponse: $data';
+    if (res.rows.isEmpty) return '🔍 Aucun résultat pour $field="$value" dans $table';
+
+    final total = res.total;
+    final buf = StringBuffer();
+    if (total != null && total > res.rows.length) {
+      buf.writeln('🔍 $field="$value" dans "$table" — ${_formatNumber(total)} correspondances, ${res.rows.length} affichées :');
+    } else {
+      buf.writeln('🔍 Résultats pour $field="$value" dans $table (${res.rows.length}) :');
+    }
+    buf.writeln();
+    for (final item in res.rows) {
+      buf.writeln(_formatJsonList([item]));
+      buf.writeln();
+    }
+    if (total != null && total > res.rows.length) {
+      buf.writeln('👉 Ouvrez Tables pour voir les ${_formatNumber(total - res.rows.length)} restantes.');
+    }
+    return buf.toString().trimRight();
   }
 
   Future<String> _fetchSchema(String table) async {
@@ -1746,46 +2046,388 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       return;
     }
 
+    if (_needsBackend(command) && _backendUrl.isNotEmpty && !_isConnected) {
+      await OfflineQueue.instance.enqueue(widget.projectId, command);
+      await _refreshPendingCount();
+      if (!mounted) return;
+      setState(() { _isTyping = false; });
+      _botSay('⚠️ Hors ligne — commande mise en file d\'attente.\n\nElle sera renvoyee automatiquement des que le backend sera de nouveau joignable.\n\nFile d\'attente: $_pendingCommands commande(s).');
+      return;
+    }
+
     Future.delayed(const Duration(milliseconds: 800), () async {
       if (!mounted) return;
-      String response;
-      final lower = command.toLowerCase().trim();
-      const dataCommands = ['/users', '/products', '/produits', '/orders', '/commandes',
-        '/count', '/last', '/search', '/schema', '/table'];
-      final matchesData = dataCommands.any((c) => lower == c || lower.startsWith('$c '));
-
-      if (lower == '/help' || lower == '/aide') {
-        response = '🤖 Commandes Prone:\n\n/status - Vérifier le backend\n/test - Tester la connexion\n/tables - Lister les tables\n/users - Tous les utilisateurs\n/users <email> - Chercher par email\n/products - Tous les produits\n/count <table> - Compter\n/last <table> [n] - Dernières lignes\n/search <table> <champ> <valeur> - Rechercher\n/schema <table> - Structure\n/protect - Rapport sécurité\n/ping - Test de connexion\n/help - Aide';
-      } else if (lower == '/status' || lower == '/test' || lower == '/health') {
-        response = await _checkBackendStatus();
-      } else if (lower == '/tables') {
-        response = await _listTables();
-      } else if (lower == '/protect') {
-        response = _protector.getStatusReport();
-      } else if (matchesData) {
-        if (_backendUrl.isEmpty) {
-          response = '⚠️ Aucun backend configuré.\n\nConnectez un backend dans les paramètres du projet pour utiliser les commandes de données.\n\nTapez /help pour les commandes disponibles.';
-        } else {
-          response = await _executeRealCommand(command);
-        }
-      } else {
-        final libCmd = CommandLibrary.findCommand(lower);
-        if (libCmd != null) {
-          response = libCmd.execute(libCmd.currentParams).toString();
-        } else {
-          response = '❌ Commande inconnue: "$command"\n\nTapez /help pour voir les commandes disponibles.';
-        }
+      final response = await _resolveCommand(command);
+      if (response == '__NAV_TABLES__') {
+        if (!mounted) return;
+        setState(() => _isTyping = false);
+        context.go('/projects/${widget.projectId}/tables');
+        return;
       }
-      _backend.sendMessage(widget.projectId, response, sender: 'bot').catchError((_) => <String, dynamic>{'error': true});
-      if (!mounted) return;
-      setState(() {
-        _isTyping = false;
-        _messages.add(_ChatMessage(sender: _members.first, text: response, timestamp: DateTime.now()));
-      });
+      if (response == '__NAV_ALERTS__') {
+        if (!mounted) return;
+        setState(() => _isTyping = false);
+        _showAlertsSheet();
+        return;
+      }
+      await _botSay(response);
+      if (_lastCmdOffline) {
+        final already = await OfflineQueue.instance.pending(widget.projectId);
+        if (!already.any((c) => c.command == command)) {
+          await OfflineQueue.instance.enqueue(widget.projectId, command);
+        }
+        await _refreshPendingCount();
+      } else {
+        if (_needsBackend(command) && mounted) setState(() => _isConnected = true);
+        await _flushQueue();
+      }
       if (_scrollController.hasClients) {
         _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
       }
     });
+  }
+
+  bool _needsBackend(String command) {
+    final lower = command.toLowerCase().trim();
+    const remote = ['/users', '/products', '/produits', '/orders', '/commandes',
+      '/count', '/last', '/search', '/schema', '/table', '/tables',
+      '/status', '/test', '/health', '/ping', '/user', '/endpoints'];
+    return remote.any((c) => lower == c || lower.startsWith('$c '));
+  }
+
+  Future<void> _botSay(String text) async {
+    try {
+      await _backend.sendMessage(widget.projectId, text, sender: 'bot');
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _isTyping = false;
+      _messages.add(_ChatMessage(sender: _members.first, text: text, timestamp: DateTime.now()));
+    });
+  }
+
+  bool _ensureBackend() => _backendUrl.isNotEmpty;
+
+  String get _noBackendMsg =>
+      '⚠️ Aucun backend configuré.\n\nConnectez un backend via le menu → Backend pour interroger vos données.\n\nTapez /help pour les commandes disponibles.';
+
+  Future<String> _resolveCommand(String command) async {
+    final raw = command.trim();
+    final parts = raw.split(RegExp(r'\s+'));
+    final name = (parts.isNotEmpty ? parts.first : raw).toLowerCase().replaceFirst('/', '');
+    final args = parts.length > 1 ? parts.sublist(1) : <String>[];
+
+    switch (name) {
+      case 'help':
+      case 'aide':
+        return CommandLibrary.help();
+
+      case 'status':
+      case 'test':
+      case 'health':
+        if (!_ensureBackend()) return _noBackendMsg;
+        return await _checkBackendStatus();
+
+      case 'ping':
+        if (!_ensureBackend()) return _noBackendMsg;
+        return await _pingBackend();
+
+      case 'protect':
+        return _protector.getStatusReport();
+
+      case 'alerts':
+        return '__NAV_ALERTS__';
+
+      case 'version':
+        return _versionInfo();
+
+      case 'tables':
+        if (!_ensureBackend()) return _noBackendMsg;
+        return await _listTables();
+
+      case 'tables-ui':
+      case 'inspect':
+        return '__NAV_TABLES__';
+
+      case 'endpoints':
+        if (!_ensureBackend()) return _noBackendMsg;
+        return await _endpointsInfo();
+
+      case 'requests':
+        return await _requestsInfo();
+
+      case 'errors':
+        return await _errorsInfo();
+
+      case 'workflows':
+        return await _workflowsInfo();
+
+      case 'run':
+        if (args.isEmpty) return '❌ Usage: /run <workflow>';
+        return await _runWorkflowByName(args.join(' '));
+
+      case 'history':
+        return await _historyInfo();
+
+      case 'users':
+      case 'products':
+      case 'produits':
+      case 'orders':
+      case 'commandes':
+      case 'count':
+      case 'last':
+      case 'search':
+      case 'schema':
+      case 'table':
+        if (!_ensureBackend()) return _noBackendMsg;
+        return await _executeRealCommand(raw);
+
+      case 'user':
+        if (!_ensureBackend()) return _noBackendMsg;
+        if (args.isEmpty) return '❌ Usage: /user <id>';
+        return await _fetchTableRow('users', args[0]);
+
+      case 'query':
+        return 'ℹ️ Les requêtes SQL brutes ne sont pas possibles via une API REST.\n\nUtilisez plutôt :\n• /search <table> <champ> <valeur>\n• /table <nom>\n• /count <table>\n• /inspect pour l\'explorateur complet';
+
+      case 'restart':
+        return 'ℹ️ Prone ne redémarre pas votre backend : ce serait dangereux de l\'extérieur.\n\nGérez le redémarrage depuis votre hébergeur (Supabase, Render, Vercel, etc.).';
+
+      case 'uptime':
+        return _uptimeInfo();
+
+      default:
+        return '❌ Commande inconnue: "$command"\n\nTapez /help pour voir les commandes disponibles.';
+    }
+  }
+
+  String _versionInfo() {
+    final buf = StringBuffer('📦 Prone\n\n');
+    buf.writeln('App: 1.0.0');
+    buf.writeln('Flutter: 3.44.1');
+    buf.writeln('');
+    if (_backendUrl.isEmpty) {
+      buf.writeln('Backend: aucun connecté');
+    } else {
+      buf.writeln('Backend: $_backendUrl');
+      buf.writeln('Type: ${_backendType.toUpperCase()}');
+      buf.writeln('Clé API: ${_projectApiKey.isEmpty ? "non définie" : "${_projectApiKey.substring(0, 6)}…"}');
+    }
+    return buf.toString().trimRight();
+  }
+
+  String _uptimeInfo() {
+    final since = _protector.monitoringSince;
+    if (since == null) {
+      return '⏱️ Prone n\'a pas encore mesuré ce backend dans cette session.\n\nLancez /status pour démarrer la surveillance.';
+    }
+    final d = DateTime.now().difference(since);
+    final h = d.inHours;
+    final m = d.inMinutes.remainder(60);
+    return '⏱️ Surveillance active depuis $h h $m min\n\n'
+        'Début: ${since.day}/${since.month}/${since.year} ${since.hour}:${since.minute.toString().padLeft(2, '0')}\n'
+        'Vérifications: toutes les 45 s';
+  }
+
+  Future<String> _pingBackend() async {
+    final sw = Stopwatch()..start();
+    final res = await BackendAdapter.check(_backendUrl, _projectApiKey, type: _backendType);
+    sw.stop();
+    if (!res.online) {
+      setState(() => _isConnected = false);
+      await BackendErrorStore.instance.record(widget.projectId, 'Ping échoué', command: '/ping', level: ErrorLevel.offline);
+      await _refreshAlertCount();
+      return '❌ Ping échoué — backend injoignable.\n\n${res.message}';
+    }
+    setState(() => _isConnected = true);
+    return '🏓 Pong !\n\n'
+        'URL: $_backendUrl\n'
+        'HTTP: ${res.statusCode}\n'
+        'Latence réseau: ${sw.elapsedMilliseconds} ms\n'
+        'Reponse: ${res.responseTime} ms\n'
+        'Type: ${res.type}';
+  }
+
+  Future<String> _endpointsInfo() async {
+    final tables = await BackendAdapter.listTables(_backendUrl, _projectApiKey, type: _backendType);
+    if (tables.isEmpty) {
+      return '🌐 Aucun endpoint détecté sur $_backendUrl.\n\nVérifiez l\'URL et la clé API (menu → Backend).';
+    }
+    final buf = StringBuffer('🌐 Endpoints détectés sur $_backendUrl (${tables.length}) :\n\n');
+    for (final t in tables) {
+      buf.writeln('• $t');
+    }
+    buf.writeln('\n👉 /inspect pour les explorer.');
+    return buf.toString().trimRight();
+  }
+
+  Future<String> _requestsInfo() async {
+    final calls = await ApiCallLog.instance.recent(limit: 15);
+    if (calls.isEmpty) {
+      return '📨 Aucune requête enregistrée pour l\'instant.\n\nElles apparaîtront ici après vos premières commandes.';
+    }
+    final buf = StringBuffer('📨 Dernières requêtes effectuées par Prone (${calls.length}) :\n\n');
+    for (final c in calls) {
+      final t = '${c.at.hour.toString().padLeft(2, '0')}:${c.at.minute.toString().padLeft(2, '0')}';
+      final code = c.status != null ? '${c.status}' : (c.offline ? 'ERR' : '---');
+      buf.writeln('$t  ${c.method}  ${c.status != null && c.status! < 400 ? "✅" : "❌"}  $code  ${c.ms}ms');
+      buf.writeln('    ${c.url}');
+    }
+    return buf.toString().trimRight();
+  }
+
+  Future<String> _errorsInfo() async {
+    final items = await BackendErrorStore.instance.recent(widget.projectId);
+    if (items.isEmpty) {
+      return '✅ Aucune erreur enregistrée pour ce projet.';
+    }
+    final buf = StringBuffer('❌ Erreurs enregistrées (${items.length}) :\n\n');
+    for (final e in items.take(15)) {
+      final t = '${e.at.day}/${e.at.month} ${e.at.hour.toString().padLeft(2, '0')}:${e.at.minute.toString().padLeft(2, '0')}';
+      buf.writeln('[$t] ${e.level.name.toUpperCase()}');
+      buf.writeln('  ${e.message}');
+      if (e.command != null && e.command!.isNotEmpty) buf.writeln('  → ${e.command}');
+      buf.writeln('');
+    }
+    return buf.toString().trimRight();
+  }
+
+  Future<String> _workflowsInfo() async {
+    final items = await _backend.getWorkflows(widget.projectId);
+    if (items.isEmpty) {
+      return '⚙️ Aucun workflow pour ce projet.\n\nCréez-en un dans le menu → Workflows.';
+    }
+    final buf = StringBuffer('⚙️ Workflows (${items.length}) :\n\n');
+    for (final w in items) {
+      final active = '${w['status']}' == 'active';
+      buf.writeln('${active ? "🟢" : "⚪️"} ${w['name']}');
+      if (w['description'] != null && '${w['description']}'.isNotEmpty) buf.writeln('   ${w['description']}');
+    }
+    buf.writeln('\n👉 /run <nom> pour en lancer un.');
+    return buf.toString().trimRight();
+  }
+
+  Future<String> _runWorkflowByName(String name) async {
+    final items = await _backend.getWorkflows(widget.projectId);
+    Map<String, dynamic>? wf;
+    for (final w in items) {
+      final n = '${w['name']}'.toLowerCase();
+      if (n == name.toLowerCase() || n.contains(name.toLowerCase())) { wf = w; break; }
+    }
+    if (wf == null) {
+      final names = items.map((w) => w['name']).join(', ');
+      return '❌ Workflow "$name" introuvable.\n\nDisponibles: ${names.isEmpty ? "aucun" : names}';
+    }
+    if (!_ensureBackend()) return _noBackendMsg;
+
+    final sw = Stopwatch()..start();
+    final check = await BackendAdapter.check(_backendUrl, _projectApiKey, type: _backendType);
+    sw.stop();
+    final ms = sw.elapsedMilliseconds;
+    final wfName = '${wf['name']}';
+
+    final exec = await _backend.addExecution(
+      widget.projectId,
+      wfName,
+      check.online ? 'success' : 'failed',
+      duration: '$ms ms',
+    );
+    await _backend.addLog(
+      widget.projectId,
+      check.online ? 'info' : 'error',
+      'Workflow "$wfName" exécuté — backend ${check.online ? "en ligne" : "injoignable"} ($ms ms)',
+    );
+    await _refreshAlertCount();
+
+    final execId = '${exec['id']}';
+    return '▶️ Workflow "$wfName"\n\n'
+        'Résultat: ${check.online ? "✅ backend en ligne" : "❌ backend injoignable"}\n'
+        'HTTP: ${check.statusCode}\n'
+        'Durée: $ms ms\n'
+        'Exécution: ${execId.substring(0, execId.length.clamp(0, 8))}\n\n'
+        '👉 /history pour l\'historique.';
+  }
+
+  Future<String> _historyInfo() async {
+    final items = await _backend.getExecutions(widget.projectId);
+    if (items.isEmpty) {
+      return '📅 Aucune exécution pour ce projet.\n\nLancez un workflow avec /run <nom>.';
+    }
+    final buf = StringBuffer('📅 Exécutions (${items.length}) :\n\n');
+    for (final e in items.take(15)) {
+      final at = DateTime.tryParse((e['created_at'] as String?) ?? '');
+      final t = at != null
+          ? '${at.day}/${at.month} ${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}'
+          : '--/--';
+      final st = '${e['status']}';
+      final icon = st == 'success' ? '✅' : st == 'failed' ? '❌' : '⏳';
+      buf.writeln('$t  $icon  ${e['name']}  ${e['duration'] ?? ''}');
+    }
+    return buf.toString().trimRight();
+  }
+
+  Future<String> _fetchTableRow(String table, String id) async {
+    final res = await BackendAdapter.fetchRows(_backendUrl, _projectApiKey, table,
+        limit: 1, offset: 0, type: _backendType, searchField: 'id', searchValue: id);
+    if (!res.ok) {
+      if (res.offline) {
+        _lastCmdOffline = true;
+        return '⚠️ Hors ligne — impossible de lire #$id.';
+      }
+      return '❌ Erreur ${res.error}';
+    }
+    if (res.rows.isEmpty) return '🔍 Aucune ligne avec id="$id" dans "$table".';
+    final row = res.rows.first;
+    final buf = StringBuffer('👤 $table #$id\n\n');
+    row.forEach((k, v) => buf.writeln('$k: $v'));
+    return buf.toString().trimRight();
+  }
+
+  Future<void> _retryPending() async {
+    if (_backendUrl.isEmpty) return;
+    setState(() => _isTyping = true);
+    try {
+      final res = await BackendAdapter.check(_backendUrl, _projectApiKey, type: _backendType);
+      if (mounted) setState(() => _isConnected = res.online);
+      if (!res.online) {
+        if (!mounted) return;
+        setState(() => _isTyping = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: const Text('Toujours hors ligne — reessayez plus tard'),
+          backgroundColor: AppColors.warning,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ));
+        return;
+      }
+      await _flushQueue();
+    } catch (_) {
+      if (mounted) setState(() => _isConnected = false);
+    }
+    if (mounted) setState(() => _isTyping = false);
+  }
+
+  Future<void> _flushQueue() async {
+    final pending = await OfflineQueue.instance.pending(widget.projectId);
+    if (pending.isEmpty) return;
+    await _refreshPendingCount();
+    if (_pendingCommands == 0 || _lastCmdOffline) return;
+
+    await _botSay('🔁 Backend de retour en ligne — ${pending.length} commande(s) en file d\'attente...');
+
+    for (final item in pending) {
+      final res = await _resolveCommand(item.command);
+      await OfflineQueue.instance.remove(item.id);
+      if (_lastCmdOffline) break;
+      await _botSay('📤 ${item.command}\n\n$res');
+      await Future.delayed(const Duration(milliseconds: 250));
+    }
+    await _refreshPendingCount();
+    if (!_lastCmdOffline) {
+      await _botSay(_pendingCommands > 0
+          ? '⚠️ $_pendingCommands commande(s) restent en attente (backend toujours hors ligne).'
+          : '✅ File d\'attente vide.');
+    }
   }
 
   void _showMentionNotification(_Member member, String text) {
@@ -1824,7 +2466,8 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       if (item is Map) {
         final name = item['nom'] ?? item['name'] ?? item['title'] ?? item['id'] ?? '---';
         final price = item['prix'] ?? item['price'] ?? '';
-        buf.writeln('• $name${price != '' ? ' ($price FCFA)' : ''}');
+        final currency = item['currency'] ?? item['devise'] ?? '';
+        buf.writeln('• $name${price != '' ? ' ($price${currency != '' ? ' $currency' : ''})' : ''}');
         // Show extra fields
         for (final key in item.keys) {
           if (!['nom', 'name', 'title', 'id', 'prix', 'price', 'description_images', 'main_image', 'created_at'].contains(key)) {
@@ -1885,13 +2528,19 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     }
     try {
       final result = await BackendAdapter.check(_backendUrl, _projectApiKey, type: _backendType);
+      if (mounted) setState(() => _isConnected = result.online);
       if (result.online) {
         _updateProjectStatus('En ligne - ${result.responseTime}ms', 'success');
+        _lastCmdOffline = false;
+        await _flushQueue();
       } else {
         _updateProjectStatus('Hors ligne', 'error');
+        await BackendErrorStore.instance.record(widget.projectId, 'Backend inaccessible — ${result.message}', command: '/status', level: ErrorLevel.offline);
+        await _refreshAlertCount();
       }
       return result.message;
     } catch (e) {
+      if (mounted) setState(() => _isConnected = false);
       _updateProjectStatus('Erreur de connexion', 'error');
       return '❌ Erreur: $e';
     }

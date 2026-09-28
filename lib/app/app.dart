@@ -17,6 +17,7 @@ import '../../features/projects/project_executions_page.dart';
 import '../../features/projects/project_monitoring_page.dart';
 import '../../features/projects/project_logs_page.dart';
 import '../../features/projects/project_settings_page.dart';
+import '../../features/projects/project_tables_page.dart';
 import '../../features/profile/profile_screen.dart';
 import '../../features/settings/settings_screen.dart';
 
@@ -220,6 +221,7 @@ final _router = GoRouter(
             GoRoute(path: 'webhooks', builder: (_, state) => ProjectWebhooksPage(projectId: state.pathParameters['projectId']!)),
             GoRoute(path: 'executions', builder: (_, state) => ProjectExecutionsPage(projectId: state.pathParameters['projectId']!)),
             GoRoute(path: 'monitoring', builder: (_, state) => ProjectMonitoringPage(projectId: state.pathParameters['projectId']!)),
+            GoRoute(path: 'tables', builder: (_, state) => ProjectTablesPage(projectId: state.pathParameters['projectId']!)),
             GoRoute(path: 'logs', builder: (_, state) => ProjectLogsPage(projectId: state.pathParameters['projectId']!)),
             GoRoute(path: 'settings', builder: (_, state) => ProjectSettingsPage(projectId: state.pathParameters['projectId']!)),
           ],

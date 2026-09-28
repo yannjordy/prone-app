@@ -26,12 +26,7 @@ class _ProjectWebhooksPageState extends State<ProjectWebhooksPage> {
   }
 
   Future<void> _loadWebhooks() async {
-    var whs = await _backend.getWebhooks(widget.projectId);
-    if (whs.isEmpty) {
-      await _backend.createWebhook(widget.projectId, 'Stripe Payment', 'https://api.example.com/webhook/stripe', ['payment.success', 'payment.failed']);
-      await _backend.createWebhook(widget.projectId, 'GitHub Push', 'https://api.example.com/webhook/github', ['push', 'pull_request']);
-      whs = await _backend.getWebhooks(widget.projectId);
-    }
+    final whs = await _backend.getWebhooks(widget.projectId);
     if (mounted) setState(() => _webhooks = whs);
   }
 

@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:math';
-import 'package:dio/dio.dart';
 import '../backend/backend_adapter.dart';
 
 enum AlertLevel { info, warning, error, critical, offline }
@@ -22,9 +21,6 @@ class BotProtector {
 
   Timer? _healthTimer;
   Timer? _anomalyTimer;
-  final _dio = Dio();
-  final _random = Random();
-  final List<SecurityAlert> _alertHistory = [];
   final List<double> _responseTimes = [];
   final List<int> _errorCodes = [];
   int _requestCount = 0;
@@ -34,10 +30,14 @@ class BotProtector {
   DateTime? _lastHealthyCheck;
   bool _isBackendOnline = true;
   String _lastError = '';
+  DateTime? _monitoringSince;
+
+  DateTime? get monitoringSince => _monitoringSince;
 
   void startMonitoring(String backendUrl, String apiKey, String backendType, Function(SecurityAlert) onAlert) {
     _healthTimer?.cancel();
     _anomalyTimer?.cancel();
+    _monitoringSince ??= DateTime.now();
 
     // Health check every 45 seconds
     _healthTimer = Timer.periodic(const Duration(seconds: 45), (_) async {
@@ -183,25 +183,18 @@ class BotProtector {
     return _responseTimes.reduce((a, b) => a + b) ~/ _responseTimes.length;
   }
 
-  String _getDioErrorMessage(DioException e) {
-    if (e.response != null) {
-      return 'Status ${e.response?.statusCode}';
-    } else if (e.type == DioExceptionType.connectionTimeout || e.type == DioExceptionType.sendTimeout) {
-      return 'Timeout - le serveur ne répond pas';
-    } else if (e.type == DioExceptionType.connectionError) {
-      return 'Impossible de se connecter au backend';
-    }
-    return e.message ?? 'Erreur inconnue';
-  }
-
   String getStatusReport() {
+    final lastCheck = _lastHealthyCheck != null
+        ? "${_lastHealthyCheck!.hour}:${_lastHealthyCheck!.minute.toString().padLeft(2, '0')}:${_lastHealthyCheck!.second.toString().padLeft(2, '0')}"
+        : "Aucune";
     return '📊 Rapport du Bot Protector\n'
         '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
         '  Backend:     ${_isBackendOnline ? "✅ En ligne" : "❌ Hors ligne"}\n'
         '  Requêtes:    $_requestCount\n'
         '  Temps moyen: ${_avgResponseTime}ms\n'
         '  Erreurs:     $_consecutiveErrors consécutives\n'
-        '  Dernière vérification: ${_lastHealthyCheck != null ? "${_lastHealthyCheck!.hour}:${_lastHealthyCheck!.minute.toString().padLeft(2, '0')}" : "Aucune"}\n'
+        '  Dernière vérification: $lastCheck\n'
+        '${_lastError.isNotEmpty ? "  Dernière erreur: $_lastError\n" : ""}'
         '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
   }
 }

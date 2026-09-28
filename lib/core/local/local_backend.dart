@@ -270,36 +270,31 @@ class LocalBackend {
     await _db.delete('members', where: 'id = ?', whereArgs: [memberId]);
   }
 
+  /// Cree uniquement l'organisation par defaut et le compte admin.
+  /// Aucun projet, aucune connexion et aucun message de demo :
+  /// l'utilisateur connecte lui-meme son propre backend.
   Future<void> seedData() async {
-    final existing = await _db.query('projects');
-    if (existing.isNotEmpty) return;
+    final orgs = await _db.query('organizations');
+    if (orgs.isNotEmpty) return;
 
     final orgId = _uuid.v4();
     final now = DateTime.now().toIso8601String();
-    await _db.insert('organizations', {'id': orgId, 'name': 'Mon Espace', 'description': 'Espace de travail principal', 'created_at': now, 'updated_at': now});
-
-    final projects = [
-      {'name': 'ODA Market', 'desc': 'Backend API pour ODA Market - E-commerce', 'key': 'oda-market-key-2024', 'url': 'https://oda-markets.vercel.app'},
-      {'name': 'ODA Seller', 'desc': 'Backend API pour ODA Seller - Gestion vendeurs', 'key': 'oda-seller-key-2024', 'url': 'https://oda-markets.vercel.app/seller'},
-      {'name': 'WhatsApp Bot', 'desc': 'Bot WhatsApp pour notifications', 'key': 'whatsapp-bot-key', 'url': 'https://api.whatsapp.com/v1'},
-    ];
-
-    for (final p in projects) {
-      final projId = _uuid.v4();
-      await _db.insert('projects', {
-        'id': projId, 'organization_id': orgId, 'name': p['name'], 'description': p['desc'],
-        'api_key': p['key'], 'backend_url': p['url'],
-        'photo': '',
-        'is_pinned': 0, 'is_archived': 0, 'is_muted': 0,
-        'created_at': now, 'updated_at': now,
-      });
-      await _db.insert('messages', {'id': _uuid.v4(), 'project_id': projId, 'content': 'Backend connecte avec succes', 'sender': 'bot', 'is_bot': 1, 'created_at': now});
-      await _db.insert('messages', {'id': _uuid.v4(), 'project_id': projId, 'content': 'health', 'sender': 'user', 'is_bot': 0, 'created_at': now});
-      await _db.insert('messages', {'id': _uuid.v4(), 'project_id': projId, 'content': '✅ Backend status: All systems operational.\n• API: Online (200 OK)\n• Database: Connected\n• Uptime: 99.98%', 'sender': 'bot', 'is_bot': 1, 'created_at': now});
-      await _db.insert('connections', {'id': _uuid.v4(), 'project_id': projId, 'name': 'Production', 'url': p['url']!, 'api_key': p['key'], 'status': 'connected', 'created_at': now});
-    }
-
-    await _db.insert('members', {'id': _uuid.v4(), 'organization_id': orgId, 'project_id': '', 'name': 'Admin', 'email': 'admin@prone.app', 'role': 'admin', 'created_at': now});
+    await _db.insert('organizations', {
+      'id': orgId,
+      'name': 'Mon Espace',
+      'description': 'Espace de travail principal',
+      'created_at': now,
+      'updated_at': now,
+    });
+    await _db.insert('members', {
+      'id': _uuid.v4(),
+      'organization_id': orgId,
+      'project_id': '',
+      'name': 'Admin',
+      'email': 'admin@prone.app',
+      'role': 'admin',
+      'created_at': now,
+    });
   }
 
   Future<void> updateProjectStatus(String projectId, String status, {String? statusType}) async {
