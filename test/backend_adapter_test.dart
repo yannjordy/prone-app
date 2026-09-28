@@ -100,6 +100,47 @@ void main() {
       expect(withCols.ok, isTrue);
     });
   });
+
+  group('WriteResult', () {
+    test('ok sans erreur', () {
+      const r = WriteResult(method: 'POST', url: '/users', statusCode: 201, rows: [{'id': 1}]);
+      expect(r.ok, isTrue);
+      expect(r.affected, 1);
+      expect(r.row, {'id': 1});
+    });
+
+    test('pas ok quand erreur presente', () {
+      const r = WriteResult(method: 'DELETE', url: '/users/1', statusCode: 403, error: 'refuse');
+      expect(r.ok, isFalse);
+      expect(r.affected, isNull);
+      expect(r.row, isNull);
+    });
+
+    test('offline est distinct d\'une erreur HTTP', () {
+      const offline = WriteResult(method: 'POST', url: '/users', statusCode: 0, error: 'timeout', offline: true);
+      expect(offline.ok, isFalse);
+      expect(offline.offline, isTrue);
+
+      const forbidden = WriteResult(method: 'POST', url: '/users', statusCode: 403, error: 'rls');
+      expect(forbidden.offline, isFalse);
+    });
+  });
+
+  group('Garde-fou d\'ecriture', () {
+    test('insertRow refuse une map vide sans toucher au reseau', () async {
+      final r = await BackendAdapter.insertRow('https://example.com', 'k', 'users', const {});
+      expect(r.ok, isFalse);
+      expect(r.statusCode, 0);
+      expect(r.error, contains('Aucune valeur'));
+    });
+
+    test('updateRow refuse une map vide sans toucher au reseau', () async {
+      final r = await BackendAdapter.updateRow('https://example.com', 'k', 'users', const {},
+          idColumn: 'id', idValue: '1');
+      expect(r.ok, isFalse);
+      expect(r.error, contains('Aucune valeur'));
+    });
+  });
 }
 
 class SocketExceptionLike implements Exception {

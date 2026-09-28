@@ -90,6 +90,36 @@ class CommandLibrary {
       params: ['table', 'champ', 'valeur'],
     ),
 
+    // Ecriture
+    Command(
+      name: 'insert',
+      description: 'Inserer une ligne (confirmation requise)',
+      category: 'Ecriture',
+      icon: 'assets/icons/plus.svg',
+      params: ['table', 'champ=valeur', '...'],
+    ),
+    Command(
+      name: 'update',
+      description: 'Modifier une ligne existante',
+      category: 'Ecriture',
+      icon: 'assets/icons/edit.svg',
+      params: ['table', 'id', 'champ=valeur', '...'],
+    ),
+    Command(
+      name: 'edit',
+      description: 'Ouvrir le formulaire de modification',
+      category: 'Ecriture',
+      icon: 'assets/icons/edit.svg',
+      params: ['table', 'id'],
+    ),
+    Command(
+      name: 'delete',
+      description: 'Supprimer une ligne (confirmation requise)',
+      category: 'Ecriture',
+      icon: 'assets/icons/trash.svg',
+      params: ['table', 'id'],
+    ),
+
     // API
     Command(
       name: 'endpoints',

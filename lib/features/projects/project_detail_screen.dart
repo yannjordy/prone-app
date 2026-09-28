@@ -2187,6 +2187,21 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         if (args.isEmpty) return '❌ Usage: /user <id>';
         return await _fetchTableRow('users', args[0]);
 
+      case 'insert':
+        if (!_ensureBackend()) return _noBackendMsg;
+        return await _writeInsert(args);
+
+      case 'update':
+        if (!_ensureBackend()) return _noBackendMsg;
+        return await _writeUpdate(args);
+
+      case 'delete':
+        if (!_ensureBackend()) return _noBackendMsg;
+        return await _writeDelete(args);
+
+      case 'edit':
+        return '__NAV_TABLES__';
+
       case 'query':
         return 'ℹ️ Les requêtes SQL brutes ne sont pas possibles via une API REST.\n\nUtilisez plutôt :\n• /search <table> <champ> <valeur>\n• /table <nom>\n• /count <table>\n• /inspect pour l\'explorateur complet';
 
@@ -2381,6 +2396,236 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     final buf = StringBuffer('👤 $table #$id\n\n');
     row.forEach((k, v) => buf.writeln('$k: $v'));
     return buf.toString().trimRight();
+  }
+
+  Future<String> _environmentName() async {
+    try {
+      final conns = await _backend.getConnections(widget.projectId);
+      final target = _backendUrl.replaceAll(RegExp(r'/+$'), '');
+      for (final c in conns) {
+        if ('${c['url']}'.replaceAll(RegExp(r'/+$'), '') == target) {
+          final name = '${c['name']}';
+          if (name.isNotEmpty) return name;
+        }
+      }
+    } catch (_) {}
+    return 'Non défini';
+  }
+
+  bool _isProduction(String env) => env.toLowerCase().contains('prod');
+
+  dynamic _parseWriteValue(String raw) {
+    final l = raw.toLowerCase();
+    if (l == 'null') return null;
+    if (l == 'true') return true;
+    if (l == 'false') return false;
+    if (RegExp(r'^-?\d+$').hasMatch(raw)) {
+      final i = int.tryParse(raw);
+      if (i != null && i.toString() == raw) return i;
+    }
+    if (RegExp(r'^-?\d+\.\d+$').hasMatch(raw)) {
+      final d = double.tryParse(raw);
+      if (d != null) return d;
+    }
+    final first = raw.isNotEmpty ? raw[0] : '';
+    final last = raw.isNotEmpty ? raw[raw.length - 1] : '';
+    if ((first == '{' && last == '}') || (first == '[' && last == ']')) {
+      try {
+        return jsonDecode(raw);
+      } catch (_) {}
+    }
+    return raw;
+  }
+
+  ({List<String> rest, bool confirmed, bool forced}) _splitConfirm(List<String> tokens) {
+    var rest = List<String>.from(tokens);
+    var confirmed = false;
+    var forced = false;
+    if (rest.length >= 2 && rest[rest.length - 1].toLowerCase() == 'prod' && rest[rest.length - 2].toLowerCase() == 'confirm') {
+      confirmed = true;
+      forced = true;
+      rest = rest.sublist(0, rest.length - 2);
+    } else if (rest.isNotEmpty && rest.last.toLowerCase() == 'confirm') {
+      confirmed = true;
+      rest = rest.sublist(0, rest.length - 1);
+    }
+    return (rest: rest, confirmed: confirmed, forced: forced);
+  }
+
+  String _writePreview({
+    required String usage,
+    required String verb,
+    required String table,
+    required Map<String, dynamic> values,
+    required List<String> invalid,
+    required bool needsProd,
+    required List<String> echoed,
+  }) {
+    final env = _lastEnv ?? 'Non défini';
+    final buf = StringBuffer('✏️ Aperçu — rien n\'a été envoyé\n\n');
+    buf.writeln('Action : $verb dans "$table"');
+    buf.writeln('Environnement : $env${needsProd ? '  ⚠️ PRODUCTION' : ''}');
+    buf.writeln('Champs (${values.length}) :');
+    values.forEach((k, v) => buf.writeln('• $k = $v'));
+    if (invalid.isNotEmpty) buf.writeln('\nTokens ignorés (sans "=") : ${invalid.join(', ')}');
+    if (needsProd) {
+      buf.writeln('\n🔐 Écriture de production : ajoutez `confirm prod` pour valider.');
+    } else {
+      buf.writeln('\n🔐 Ajoutez `confirm` pour valider.');
+    }
+    buf.writeln('\n$usage');
+    buf.writeln('${echoed.join(' ')}${needsProd ? ' confirm prod' : ' confirm'}');
+    return buf.toString().trimRight();
+  }
+
+  String? _lastEnv;
+
+  String _formatWriteResult(WriteResult res, String verb, String table) {
+    if (!res.ok) {
+      if (res.offline) {
+        _lastCmdOffline = true;
+        return '⚠️ Hors ligne — $verb non effectué(e).\n\nLa commande est mise en file d\'attente.';
+      }
+      return '❌ $verb refusé(e) par "$table"\n\n${res.error}\nHTTP ${res.statusCode}';
+    }
+    final n = res.affected ?? 1;
+    final buf = StringBuffer('✅ $verb réussie — "$table"\n\n');
+    buf.writeln('HTTP ${res.statusCode} · ${res.method} · $n ligne(s)');
+    if (res.row != null) {
+      buf.writeln('\nLigne concernée :');
+      res.row!.forEach((k, v) {
+        final s = '$v';
+        buf.writeln('• $k = ${s.length > 60 ? '${s.substring(0, 60)}…' : s}');
+      });
+    }
+    return buf.toString().trimRight();
+  }
+
+  Future<String> _finishWrite(WriteResult res, String verb, String table, String command) async {
+    BackendAdapter.invalidateCountCache();
+    await BackendErrorStore.instance.record(
+      widget.projectId,
+      res.ok ? '${res.method} $table — ${res.affected ?? 1} ligne(s)' : '${res.method} $table: ${res.error}',
+      command: command,
+      level: res.ok ? ErrorLevel.warning : (res.offline ? ErrorLevel.offline : ErrorLevel.error),
+    );
+    _refreshAlertCount();
+    if (res.ok) setState(() => _isConnected = true);
+    return _formatWriteResult(res, verb, table);
+  }
+
+  Future<String> _writeInsert(List<String> tokens) async {
+    const usage = 'Usage: /insert <table> champ=valeur ...';
+    if (tokens.length < 2) return '❌ $usage';
+    final conf = _splitConfirm(tokens);
+    final table = conf.rest.first;
+    final pairs = conf.rest.sublist(1);
+    if (pairs.isEmpty) return '❌ $usage';
+
+    final values = <String, dynamic>{};
+    final invalid = <String>[];
+    for (final t in pairs) {
+      final i = t.indexOf('=');
+      if (i <= 0) {
+        invalid.add(t);
+        continue;
+      }
+      values[t.substring(0, i)] = _parseWriteValue(t.substring(i + 1));
+    }
+    if (values.isEmpty) return '❌ Aucun champ valide. $usage';
+
+    final env = _lastEnv = await _environmentName();
+    final needsProd = _isProduction(env);
+    if (!conf.confirmed || (needsProd && !conf.forced)) {
+      return _writePreview(
+        usage: usage,
+        verb: 'Insertion',
+        table: table,
+        values: values,
+        invalid: invalid,
+        needsProd: needsProd,
+        echoed: ['/insert', ...conf.rest],
+      );
+    }
+
+    setState(() => _isTyping = true);
+    final res = await BackendAdapter.insertRow(_backendUrl, _projectApiKey, table, values, type: _backendType);
+    if (mounted) setState(() => _isTyping = false);
+    return await _finishWrite(res, 'Insertion', table, '/insert $table');
+  }
+
+  Future<String> _writeUpdate(List<String> tokens) async {
+    const usage = 'Usage: /update <table> <id> champ=valeur ...';
+    if (tokens.length < 3) return '❌ $usage';
+    final conf = _splitConfirm(tokens);
+    if (conf.rest.length < 3) return '❌ $usage';
+    final table = conf.rest.first;
+    final idValue = conf.rest[1];
+    final pairs = conf.rest.sublist(2);
+    if (pairs.isEmpty) return '❌ $usage';
+
+    final values = <String, dynamic>{};
+    final invalid = <String>[];
+    for (final t in pairs) {
+      final i = t.indexOf('=');
+      if (i <= 0) {
+        invalid.add(t);
+        continue;
+      }
+      values[t.substring(0, i)] = _parseWriteValue(t.substring(i + 1));
+    }
+    if (values.isEmpty) return '❌ Aucun champ valide. $usage';
+
+    final env = _lastEnv = await _environmentName();
+    final needsProd = _isProduction(env);
+    if (!conf.confirmed || (needsProd && !conf.forced)) {
+      return _writePreview(
+        usage: usage,
+        verb: 'Modification',
+        table: table,
+        values: {...values, 'id': idValue},
+        invalid: invalid,
+        needsProd: needsProd,
+        echoed: ['/update', ...conf.rest],
+      );
+    }
+
+    setState(() => _isTyping = true);
+    final idCol = await BackendAdapter.findIdColumn(_backendUrl, _projectApiKey, table, type: _backendType);
+    final res = await BackendAdapter.updateRow(_backendUrl, _projectApiKey, table, values,
+        idColumn: idCol, idValue: idValue, type: _backendType);
+    if (mounted) setState(() => _isTyping = false);
+    return await _finishWrite(res, 'Modification', table, '/update $table $idValue');
+  }
+
+  Future<String> _writeDelete(List<String> tokens) async {
+    const usage = 'Usage: /delete <table> <id>';
+    if (tokens.length < 2) return '❌ $usage';
+    final conf = _splitConfirm(tokens);
+    if (conf.rest.length < 2) return '❌ $usage';
+    final table = conf.rest.first;
+    final idValue = conf.rest[1];
+
+    final env = _lastEnv = await _environmentName();
+    final needsProd = _isProduction(env);
+    if (!conf.confirmed || (needsProd && !conf.forced)) {
+      return _writePreview(
+        usage: usage,
+        verb: 'Suppression',
+        table: table,
+        values: {'id': idValue},
+        invalid: const [],
+        needsProd: needsProd,
+        echoed: ['/delete', ...conf.rest],
+      );
+    }
+
+    setState(() => _isTyping = true);
+    final idCol = await BackendAdapter.findIdColumn(_backendUrl, _projectApiKey, table, type: _backendType);
+    final res = await BackendAdapter.deleteRow(_backendUrl, _projectApiKey, table,
+        idColumn: idCol, idValue: idValue, type: _backendType);
+    if (mounted) setState(() => _isTyping = false);
+    return await _finishWrite(res, 'Suppression', table, '/delete $table $idValue');
   }
 
   Future<void> _retryPending() async {

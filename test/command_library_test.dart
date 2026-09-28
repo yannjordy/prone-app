@@ -67,6 +67,28 @@ void main() {
     }
   });
 
+  test('les commandes d\'ecriture sont presentes dans le catalogue', () {
+    final names = CommandLibrary.commands.map((c) => c.name).toSet();
+    for (final expected in ['insert', 'update', 'delete', 'edit']) {
+      expect(names.contains(expected), isTrue, reason: '/$expected manquant');
+    }
+  });
+
+  test('les commandes d\'ecriture exigent des parametres', () {
+    for (final n in ['insert', 'update', 'delete']) {
+      final cmd = CommandLibrary.findCommand('/$n');
+      expect(cmd, isNotNull);
+      expect(cmd!.params, isNotNull, reason: '/$n doit declarer ses parametres');
+      expect(cmd.params, isNotEmpty);
+    }
+  });
+
+  test('findCommand parse les paires champ=valeur', () {
+    final cmd = CommandLibrary.findCommand('/insert users email=a@b.c age=30');
+    expect(cmd, isNotNull);
+    expect(cmd!.currentParams, ['users', 'email=a@b.c', 'age=30']);
+  });
+
   test('help liste chaque commande', () {
     final help = CommandLibrary.help();
     for (final cmd in CommandLibrary.commands) {

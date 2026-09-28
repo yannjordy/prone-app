@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
+import 'dart:convert';
 import 'dart:ui';
 import '../../app/app.dart';
 import '../../core/local/local_backend.dart';
@@ -36,6 +37,7 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
   int _pageSize = 25;
   String _filterField = '';
   int _tab = 0;
+  String? _idColumn;
 
   @override
   void initState() {
@@ -93,6 +95,7 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
       _tab = 0;
       _result = null;
       _schema = null;
+      _idColumn = null;
       _filterField = '';
       _valueSearchController.clear();
     });
@@ -212,6 +215,17 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
                   style: TextStyle(fontSize: 11, color: _offline ? AppColors.error : ThemeHelper.textDim(context))),
             ]),
           ),
+          if (_selectedTable != null) ...[
+            const SizedBox(width: 8),
+            GestureDetector(
+              onTap: () => _showRowForm(),
+              child: Container(
+                padding: const EdgeInsets.all(7),
+                decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(10)),
+                child: SvgPicture.asset('assets/icons/plus.svg', width: 15, height: 15, colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn)),
+              ),
+            ),
+          ],
           GestureDetector(
             onTap: _selectedTable == null ? _loadTables : () => _loadRows(),
             child: Container(
@@ -457,6 +471,34 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
                 ),
               ),
               const SizedBox(height: 16),
+              Row(children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () { Navigator.pop(ctx); _showRowForm(initial: row); },
+                    icon: SvgPicture.asset('assets/icons/edit.svg', width: 15, height: 15, colorFilter: const ColorFilter.mode(AppColors.primary, BlendMode.srcIn)),
+                    label: const Text('Modifier', style: TextStyle(color: AppColors.primary, fontWeight: FontWeight.w600)),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: AppColors.primary),
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () { Navigator.pop(ctx); _confirmDelete(row); },
+                    icon: SvgPicture.asset('assets/icons/trash.svg', width: 15, height: 15, colorFilter: const ColorFilter.mode(AppColors.error, BlendMode.srcIn)),
+                    label: const Text('Supprimer', style: TextStyle(color: AppColors.error, fontWeight: FontWeight.w600)),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: AppColors.error),
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                  ),
+                ),
+              ]),
+              const SizedBox(height: 10),
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
@@ -477,6 +519,381 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
     if (value is List || value is Map) return value.toString();
     final s = value.toString();
     return s;
+  }
+
+  Future<String> _resolveIdColumn() async {
+    final cached = _idColumn;
+    if (cached != null) return cached;
+    final table = _selectedTable;
+    if (table == null) return 'id';
+    final col = await BackendAdapter.findIdColumn(_backendUrl, _apiKey, table, type: _backendType);
+    _idColumn = col;
+    return col;
+  }
+
+  Future<String> _environmentName() async {
+    try {
+      final conns = await _backend.getConnections(widget.projectId);
+      for (final c in conns) {
+        if ('${c['url']}'.replaceAll(RegExp(r'/+$'), '') == _backendUrl.replaceAll(RegExp(r'/+$'), '')) {
+          final name = '${c['name']}';
+          if (name.isNotEmpty) return name;
+        }
+      }
+    } catch (_) {}
+    return 'Non défini';
+  }
+
+  bool _isProduction(String env) => env.toLowerCase().contains('prod');
+
+  dynamic _coerce(String raw) {
+    final l = raw.toLowerCase();
+    if (l == 'null') return null;
+    if (l == 'true') return true;
+    if (l == 'false') return false;
+    if (RegExp(r'^-?\d+$').hasMatch(raw)) {
+      final i = int.tryParse(raw);
+      if (i != null && i.toString() == raw) return i;
+    }
+    if (RegExp(r'^-?\d+\.\d+$').hasMatch(raw)) {
+      final d = double.tryParse(raw);
+      if (d != null) return d;
+    }
+    final first = raw.isNotEmpty ? raw[0] : '';
+    final last = raw.isNotEmpty ? raw[raw.length - 1] : '';
+    if ((first == '{' && last == '}') || (first == '[' && last == ']')) {
+      try {
+        return jsonDecode(raw);
+      } catch (_) {}
+    }
+    return raw;
+  }
+
+  Future<bool> _confirmWrite({
+    required String verb,
+    required String table,
+    required Map<String, dynamic> values,
+    String? idValue,
+    bool danger = false,
+  }) async {
+    final env = await _environmentName();
+    final prod = _isProduction(env);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        final errorColor = AppColors.error;
+        return AlertDialog(
+          backgroundColor: ThemeHelper.surface(ctx),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: danger || prod ? errorColor : ThemeHelper.borderLight(ctx))),
+          title: Text('$verb dans "$table"', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: ThemeHelper.text(ctx))),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: (prod ? errorColor : AppColors.primary).withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text('Environnement : $env', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: prod ? errorColor : AppColors.primary)),
+              ),
+              if (prod) ...[
+                const SizedBox(height: 10),
+                Text('⚠️ Cette écriture cible un backend de production.', style: TextStyle(fontSize: 12.5, color: errorColor, fontWeight: FontWeight.w600)),
+              ],
+              if (idValue != null) ...[
+                const SizedBox(height: 12),
+                Text('Ligne : $idValue', style: TextStyle(fontSize: 12, color: ThemeHelper.textDim(ctx), fontFamily: 'monospace')),
+              ],
+              const SizedBox(height: 12),
+              Text('${values.length} champ(s) :', style: TextStyle(fontSize: 12, color: ThemeHelper.textDim(ctx))),
+              const SizedBox(height: 6),
+              for (final e in values.entries)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Text('• ${e.key} = ${_displayValue(e.value)}',
+                      maxLines: 2, overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 12.5, color: ThemeHelper.text(ctx), fontFamily: 'monospace')),
+                ),
+            ]),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text('Annuler', style: TextStyle(color: ThemeHelper.textDim(ctx))),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: danger || prod ? errorColor : AppColors.primary,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+              child: Text(prod ? 'Confirmer (prod)' : 'Confirmer', style: const TextStyle(fontWeight: FontWeight.w700)),
+            ),
+          ],
+        );
+      },
+    );
+    return confirmed == true;
+  }
+
+  String _prefill(dynamic value) {
+    if (value == null) return '';
+    if (value is List || value is Map) {
+      try {
+        return jsonEncode(value);
+      } catch (_) {
+        return value.toString();
+      }
+    }
+    return value.toString();
+  }
+
+  Future<void> _showRowForm({Map<String, dynamic>? initial}) async {
+    final table = _selectedTable;
+    if (table == null) return;
+    final isEdit = initial != null;
+    if (isEdit) await _resolveIdColumn();
+    if (!mounted || _selectedTable != table) return;
+
+    final cols = _schema?.ok == true
+        ? _schema!.columns.map((c) => c.name).toList()
+        : (_result?.columns ?? const <String>[]);
+    if (cols.isEmpty) {
+      _toast('Structure de "$table" indisponible — réessayez après le chargement.');
+      return;
+    }
+
+    final controllers = <String, TextEditingController>{};
+    for (final c in cols) {
+      controllers[c] = TextEditingController(text: initial == null ? '' : _prefill(initial[c]));
+    }
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: ClipRRect(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+            child: Container(
+              constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.85),
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(color: ThemeHelper.surface(ctx).withOpacity(0.97), border: Border(top: BorderSide(color: ThemeHelper.borderLight(ctx)))),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: ThemeHelper.borderLight(ctx), borderRadius: BorderRadius.circular(2)))),
+                const SizedBox(height: 16),
+                Text(isEdit ? 'Modifier — $table' : 'Insérer — $table',
+                    style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: ThemeHelper.text(ctx))),
+                const SizedBox(height: 4),
+                Text(isEdit ? 'Laissez vide pour ne pas changer un champ.' : 'Les champs vides sont ignorés.',
+                    style: TextStyle(fontSize: 12, color: ThemeHelper.textDim(ctx))),
+                const SizedBox(height: 16),
+                Flexible(
+                  child: SingleChildScrollView(
+                    child: Column(children: [
+                      for (final c in cols)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              Text(c, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: ThemeHelper.textDim(ctx), fontFamily: 'monospace')),
+                              const SizedBox(height: 6),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 12),
+                                decoration: BoxDecoration(
+                                  color: ThemeHelper.bg(ctx),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(color: ThemeHelper.borderLight(ctx)),
+                                ),
+                                child: TextField(
+                                  controller: controllers[c],
+                                  style: TextStyle(fontSize: 13, color: ThemeHelper.text(ctx), fontFamily: 'monospace'),
+                                  decoration: InputDecoration(hintText: 'valeur', border: InputBorder.none, hintStyle: TextStyle(fontSize: 13, color: ThemeHelper.textDim(ctx))),
+                                ),
+                              ),
+                            ]),
+                          ),
+                    ]),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(children: [
+                  Expanded(
+                    child: TextButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+                      child: Text('Annuler', style: TextStyle(color: ThemeHelper.textDim(ctx))),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    flex: 2,
+                    child: ElevatedButton(
+                      onPressed: () {
+                        final values = <String, dynamic>{};
+                        for (final e in controllers.entries) {
+                          final raw = e.value.text.trim();
+                          if (raw.isEmpty) continue;
+                          if (isEdit && e.key == _idColumn) continue;
+                          values[e.key] = _coerce(raw);
+                        }
+                        Navigator.pop(ctx);
+                        _submitForm(values: values, initial: initial);
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.primary,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                      ),
+                      child: Text(isEdit ? 'Enregistrer' : 'Insérer', style: const TextStyle(fontWeight: FontWeight.w700)),
+                    ),
+                  ),
+                ]),
+              ]),
+            ),
+          ),
+        ),
+      ),
+    ).whenComplete(() {
+      for (final c in controllers.values) {
+        c.dispose();
+      }
+    });
+  }
+
+  Future<void> _submitForm({required Map<String, dynamic> values, Map<String, dynamic>? initial}) async {
+    final table = _selectedTable;
+    if (table == null) return;
+    final isEdit = initial != null;
+
+    if (values.isEmpty) {
+      _toast('Aucune valeur à envoyer.');
+      return;
+    }
+
+    String? idValue;
+    String? idCol;
+    if (isEdit) {
+      idCol = await _resolveIdColumn();
+      idValue = initial[idCol] != null ? '${initial[idCol]}' : null;
+      if (idValue == null || idValue.isEmpty || idValue == 'null') {
+        final fallback = initial.keys.firstWhere((k) => k == 'id', orElse: () => '');
+        idValue = fallback.isEmpty ? null : '${initial[fallback]}';
+        idCol = fallback.isEmpty ? null : fallback;
+      }
+      if (idValue == null) {
+        _toast('Impossible d\'identifier cette ligne (colonne "$idCol" absente).');
+        return;
+      }
+      values.remove(idCol);
+      if (values.isEmpty) {
+        _toast('Aucun champ modifié.');
+        return;
+      }
+    }
+
+    final ok = await _confirmWrite(
+      verb: isEdit ? 'Modifier' : 'Insérer',
+      table: table,
+      values: values,
+      idValue: idValue,
+      danger: isEdit,
+    );
+    if (!ok) return;
+
+    setState(() => _loadingRows = true);
+    final res = isEdit
+        ? await BackendAdapter.updateRow(_backendUrl, _apiKey, table, values, idColumn: idCol!, idValue: idValue!, type: _backendType)
+        : await BackendAdapter.insertRow(_backendUrl, _apiKey, table, values, type: _backendType);
+
+    if (!mounted) return;
+    setState(() => _loadingRows = false);
+
+    if (res.ok) {
+      await BackendErrorStore.instance.record(
+        widget.projectId,
+        '${res.method} $table — ${res.affected ?? 1} ligne(s) affectée(s)',
+        command: isEdit ? '/update $table' : '/insert $table',
+        level: ErrorLevel.warning,
+      );
+      _toast(isEdit ? 'Ligne modifiée ✓' : 'Ligne insérée ✓');
+      await _loadRows(page: isEdit ? _page : 0);
+      return;
+    }
+
+    setState(() => _pageError = res.error);
+    await BackendErrorStore.instance.record(
+      widget.projectId,
+      '${res.method} $table: ${res.error}',
+      command: isEdit ? '/update $table' : '/insert $table',
+      level: res.offline ? ErrorLevel.offline : ErrorLevel.error,
+    );
+    _toast(res.offline ? 'Hors ligne — écriture non effectuée.' : 'Échec : ${res.error}');
+  }
+
+  Future<void> _confirmDelete(Map<String, dynamic> row) async {
+    final table = _selectedTable;
+    if (table == null) return;
+    final idCol = await _resolveIdColumn();
+    final raw = row[idCol];
+    final idValue = raw == null ? null : '$raw';
+    if (idValue == null || idValue.isEmpty || idValue == 'null') {
+      _toast('Impossible d\'identifier cette ligne (colonne "$idCol" absente).');
+      return;
+    }
+
+    final ok = await _confirmWrite(
+      verb: 'Supprimer',
+      table: table,
+      values: {idCol: idValue},
+      idValue: idValue,
+      danger: true,
+    );
+    if (!ok) return;
+
+    setState(() => _loadingRows = true);
+    final res = await BackendAdapter.deleteRow(_backendUrl, _apiKey, table, idColumn: idCol, idValue: idValue, type: _backendType);
+
+    if (!mounted) return;
+    setState(() => _loadingRows = false);
+
+    if (res.ok) {
+      await BackendErrorStore.instance.record(
+        widget.projectId,
+        'DELETE $table — ligne $idValue supprimée',
+        command: '/delete $table $idValue',
+        level: ErrorLevel.warning,
+      );
+      _toast('Ligne supprimée ✓');
+      await _loadRows(page: _page);
+      return;
+    }
+
+    setState(() => _pageError = res.error);
+    await BackendErrorStore.instance.record(
+      widget.projectId,
+      'DELETE $table: ${res.error}',
+      command: '/delete $table $idValue',
+      level: res.offline ? ErrorLevel.offline : ErrorLevel.error,
+    );
+    _toast(res.offline ? 'Hors ligne — suppression non effectuée.' : 'Échec : ${res.error}');
+  }
+
+  void _toast(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message, style: const TextStyle(fontSize: 13)),
+        backgroundColor: AppColors.primary,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 3),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
   }
 
   Widget _buildPagination() {

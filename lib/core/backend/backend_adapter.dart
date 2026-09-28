@@ -469,6 +469,192 @@ class BackendAdapter {
     if (value is Map) return 'object';
     return value.runtimeType.toString();
   }
+
+  static String _cleanUrl(String url) => url.replaceAll(RegExp(r'/+$'), '');
+
+  static String _tableUrl(String url, BackendType t, String table) {
+    final clean = _cleanUrl(url);
+    return t == BackendType.supabase ? '$clean/rest/v1/$table' : '$clean/$table';
+  }
+
+  static String _rowUrl(String url, BackendType t, String table, String idColumn, String idValue) {
+    final clean = _cleanUrl(url);
+    if (t == BackendType.supabase) {
+      final col = Uri.encodeQueryComponent(idColumn);
+      final val = Uri.encodeQueryComponent(idValue);
+      return '$clean/rest/v1/$table?$col=eq.$val';
+    }
+    return '$clean/$table/${Uri.encodeComponent(idValue)}';
+  }
+
+  /// Trouve la colonne d'identifiant d'une table (id, uuid, <table>_id...).
+  static Future<String> findIdColumn(String url, String apiKey, String table, {String? type}) async {
+    final schema = await fetchSchema(url, apiKey, table, type: type);
+    if (!schema.ok) return 'id';
+    final names = schema.columns.map((c) => c.name).toList();
+    for (final preferred in <String>['id', '${table}_id', '${table}s_id', 'uuid']) {
+      if (names.contains(preferred)) return preferred;
+    }
+    for (final c in schema.columns) {
+      final t = c.type.toLowerCase();
+      if (t.contains('uuid') || t.contains('serial') || t.contains('auto_increment')) return c.name;
+    }
+    return names.isNotEmpty ? names.first : 'id';
+  }
+
+  static WriteResult _writeOutcome(String method, String target, int status, dynamic data, int ms) {
+    _log(method, target, status: status, ms: ms);
+    if (status >= 200 && status < 300) {
+      final rows = <Map<String, dynamic>>[];
+      if (data is List) {
+        for (final e in data) {
+          if (e is Map) rows.add(Map<String, dynamic>.from(e));
+        }
+      } else if (data is Map) {
+        rows.add(Map<String, dynamic>.from(data));
+      }
+      return WriteResult(method: method, url: target, statusCode: status, rows: rows);
+    }
+    return WriteResult(method: method, url: target, statusCode: status, error: _writeError(status, data));
+  }
+
+  static String _writeError(int status, dynamic data) {
+    String detail = '';
+    if (data is Map) {
+      for (final key in ['message', 'error', 'error_description', 'hint', 'details']) {
+        final v = data[key];
+        if (v != null && '$v'.trim().isNotEmpty) { detail = '$v'.trim(); break; }
+      }
+    } else if (data is String && data.trim().isNotEmpty) {
+      final s = data.trim();
+      detail = s.length > 240 ? '${s.substring(0, 240)}…' : s;
+    }
+    final label = switch (status) {
+      401 => 'Clé API refusée (401)',
+      403 => 'Accès refusé — règles RLS ou permissions (403)',
+      404 => 'Table ou ligne introuvable (404)',
+      409 => 'Conflit — ligne déjà existante (409)',
+      422 => 'Valeurs invalides rejetées par le backend (422)',
+      _ => 'Erreur HTTP $status',
+    };
+    return detail.isEmpty ? label : '$label\n$detail';
+  }
+
+  static Future<WriteResult> insertRow(
+    String url,
+    String apiKey,
+    String table,
+    Map<String, dynamic> values, {
+    String? type,
+  }) async {
+    if (values.isEmpty) {
+      return WriteResult(method: 'POST', url: table, statusCode: 0, error: 'Aucune valeur à insérer.');
+    }
+    final adapter = await BackendAdapter.create(url, apiKey, type: type);
+    final target = _tableUrl(url, adapter.type, table);
+    final headers = <String, String>{...adapter.headers};
+    if (adapter.type == BackendType.supabase) headers['Prefer'] = 'return=representation';
+
+    final sw = Stopwatch()..start();
+    try {
+      final resp = await _dio.post(target,
+          data: values,
+          options: Options(
+            headers: headers,
+            receiveTimeout: const Duration(seconds: 15),
+            validateStatus: (s) => s != null && s < 500,
+          ));
+      sw.stop();
+      return _writeOutcome('POST', target, resp.statusCode ?? 0, resp.data, sw.elapsedMilliseconds);
+    } on DioException catch (e) {
+      sw.stop();
+      _log('POST', target, ms: sw.elapsedMilliseconds, offline: isOfflineError(e));
+      return WriteResult(
+        method: 'POST',
+        url: target,
+        statusCode: 0,
+        error: _humanError(e),
+        offline: isOfflineError(e),
+      );
+    }
+  }
+
+  static Future<WriteResult> updateRow(
+    String url,
+    String apiKey,
+    String table,
+    Map<String, dynamic> values, {
+    required String idColumn,
+    required String idValue,
+    String? type,
+  }) async {
+    if (values.isEmpty) {
+      return WriteResult(method: 'PATCH', url: table, statusCode: 0, error: 'Aucune valeur à mettre à jour.');
+    }
+    final adapter = await BackendAdapter.create(url, apiKey, type: type);
+    final target = _rowUrl(url, adapter.type, table, idColumn, idValue);
+    final headers = <String, String>{...adapter.headers};
+    if (adapter.type == BackendType.supabase) headers['Prefer'] = 'return=representation';
+
+    final sw = Stopwatch()..start();
+    try {
+      final resp = await _dio.patch(target,
+          data: values,
+          options: Options(
+            headers: headers,
+            receiveTimeout: const Duration(seconds: 15),
+            validateStatus: (s) => s != null && s < 500,
+          ));
+      sw.stop();
+      return _writeOutcome('PATCH', target, resp.statusCode ?? 0, resp.data, sw.elapsedMilliseconds);
+    } on DioException catch (e) {
+      sw.stop();
+      _log('PATCH', target, ms: sw.elapsedMilliseconds, offline: isOfflineError(e));
+      return WriteResult(
+        method: 'PATCH',
+        url: target,
+        statusCode: 0,
+        error: _humanError(e),
+        offline: isOfflineError(e),
+      );
+    }
+  }
+
+  static Future<WriteResult> deleteRow(
+    String url,
+    String apiKey,
+    String table, {
+    required String idColumn,
+    required String idValue,
+    String? type,
+  }) async {
+    final adapter = await BackendAdapter.create(url, apiKey, type: type);
+    final target = _rowUrl(url, adapter.type, table, idColumn, idValue);
+    final headers = <String, String>{...adapter.headers};
+    if (adapter.type == BackendType.supabase) headers['Prefer'] = 'return=representation';
+
+    final sw = Stopwatch()..start();
+    try {
+      final resp = await _dio.delete(target,
+          options: Options(
+            headers: headers,
+            receiveTimeout: const Duration(seconds: 15),
+            validateStatus: (s) => s != null && s < 500,
+          ));
+      sw.stop();
+      return _writeOutcome('DELETE', target, resp.statusCode ?? 0, resp.data, sw.elapsedMilliseconds);
+    } on DioException catch (e) {
+      sw.stop();
+      _log('DELETE', target, ms: sw.elapsedMilliseconds, offline: isOfflineError(e));
+      return WriteResult(
+        method: 'DELETE',
+        url: target,
+        statusCode: 0,
+        error: _humanError(e),
+        offline: isOfflineError(e),
+      );
+    }
+  }
 }
 
 class BackendCheckResult {
@@ -543,6 +729,28 @@ class ColumnInfo {
   final String name;
   final String type;
   const ColumnInfo({required this.name, required this.type});
+}
+
+class WriteResult {
+  final String method;
+  final String url;
+  final int statusCode;
+  final List<Map<String, dynamic>> rows;
+  final String? error;
+  final bool offline;
+
+  const WriteResult({
+    required this.method,
+    required this.url,
+    required this.statusCode,
+    this.rows = const [],
+    this.error,
+    this.offline = false,
+  });
+
+  bool get ok => error == null;
+  int? get affected => rows.isEmpty ? null : rows.length;
+  Map<String, dynamic>? get row => rows.isEmpty ? null : rows.first;
 }
 
 class SchemaResult {
