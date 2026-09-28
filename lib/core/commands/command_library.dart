@@ -191,9 +191,9 @@ class CommandLibrary {
 
   static Command? findCommand(String input) {
     if (!input.startsWith('/')) return null;
-    final parts = input.substring(1).split(' ');
+    final parts = input.substring(1).trim().split(RegExp(r'\s+'));
     final name = parts[0].toLowerCase();
-    final params = parts.length > 1 ? parts.sublist(1).cast<String>() : <String>[];
+    final params = parts.length > 1 ? parts.sublist(1).where((p) => p.isNotEmpty).toList() : <String>[];
 
     for (var cmd in commands) {
       if (cmd.name == name) {
@@ -215,7 +215,7 @@ class CommandLibrary {
       result += '── ${entry.key} ──\n';
       for (var cmd in entry.value) {
         final params = cmd.params != null ? ' <${cmd.params!.join(', ')}>' : '';
-        result += '${cmd.icon} /${cmd.name}$params - ${cmd.description}\n';
+        result += '• /${cmd.name}$params - ${cmd.description}\n';
       }
       result += '\n';
     }

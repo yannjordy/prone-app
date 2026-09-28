@@ -168,6 +168,10 @@ class _ConsoleScreenState extends State<ConsoleScreen> {
           _messages.add(_ConsoleMessage(type: _MessageType.error, text: 'Payment timeout at 14:32', timestamp: DateTime.now()));
         } else if (command.toLowerCase() == 'ping') {
           _messages.add(_ConsoleMessage(type: _MessageType.success, text: 'Pong! 45ms', timestamp: DateTime.now()));
+        } else if (command.toLowerCase() == 'logs') {
+          _messages.add(_ConsoleMessage(type: _MessageType.info, text: '14:32 INFO  Request processed (200)', timestamp: DateTime.now()));
+          _messages.add(_ConsoleMessage(type: _MessageType.warning, text: '14:15 WARN  Rate limit near threshold', timestamp: DateTime.now()));
+          _messages.add(_ConsoleMessage(type: _MessageType.error, text: '13:50 ERROR Payment timeout', timestamp: DateTime.now()));
         } else if (command.toLowerCase() == 'clear') {
           _messages.clear();
         } else {

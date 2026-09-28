@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:go_router/go_router.dart';
 import 'dart:ui';
 import '../../app/app.dart';
 import '../../core/local/local_backend.dart';
@@ -78,6 +79,15 @@ class _ProjectMonitoringPageState extends State<ProjectMonitoringPage> {
           border: Border.all(color: ThemeHelper.borderLight(context)),
         ),
         child: Row(children: [
+          GestureDetector(
+            onTap: () => context.go('/projects/${widget.projectId}'),
+            child: Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.1), borderRadius: BorderRadius.circular(10)),
+              child: SvgPicture.asset('assets/icons/chevron-left.svg', width: 18, height: 18, colorFilter: const ColorFilter.mode(AppColors.primary, BlendMode.srcIn)),
+            ),
+          ),
+          const SizedBox(width: 10),
           SvgPicture.asset('assets/icons/monitoring.svg', width: 20, height: 20,
             colorFilter: const ColorFilter.mode(AppColors.primary, BlendMode.srcIn)),
           const SizedBox(width: 12),

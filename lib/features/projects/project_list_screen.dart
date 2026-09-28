@@ -116,7 +116,13 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
 
   Future<void> _loadBackendStatus() async {
     final prefs = await SharedPreferences.getInstance();
-    setState(() => _hasBackend = prefs.getBool('has_backend') ?? false);
+    var has = prefs.getBool('has_backend') ?? false;
+    if (!has) {
+      final projects = await _backend.getProjects();
+      has = projects.any((p) => ((p['backend_url'] as String?) ?? '').isNotEmpty);
+      await prefs.setBool('has_backend', has);
+    }
+    if (mounted) setState(() => _hasBackend = has);
   }
 
   List<_Project> get _filteredProjects {
@@ -267,7 +273,14 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       _MenuItem(icon: 'plus.svg', label: 'Nouveau projet', onTap: () {
-                        setState(() { _showMenu = false; _showCreateForm = true; });
+                        setState(() { _showMenu = false; });
+                        if (!_hasBackend) {
+                          _showNoBackendWarning(onDismiss: () {
+                            if (mounted) setState(() => _showCreateForm = true);
+                          });
+                        } else {
+                          setState(() => _showCreateForm = true);
+                        }
                       }),
                       _MenuItem(icon: 'qr_code.svg', label: 'Scanner QR Code', onTap: () { setState(() { _showMenu = false; }); _showScanDialog(); }),
                       _MenuItem(icon: 'lock.svg', label: 'Rejoindre par code', onTap: () { setState(() { _showMenu = false; }); _showJoinByCodeDialog(); }),
@@ -307,7 +320,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
     );
   }
 
-  void _showNoBackendWarning() {
+  void _showNoBackendWarning({VoidCallback? onDismiss}) {
     final surfaceColor = ThemeHelper.surface(context);
     final borderColor = ThemeHelper.borderLight(context);
     showModalBottomSheet(
@@ -333,8 +346,11 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
                 Text('Vous devez connecter un backend avant de créer un projet.', textAlign: TextAlign.center, style: TextStyle(fontSize: 13, color: ThemeHelper.textDim(context))),
                 const SizedBox(height: 20),
                 GestureDetector(
-                  onTap: () => Navigator.pop(context),
-                  child: Container(width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Compris', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))),
+                  onTap: () {
+                    Navigator.pop(context);
+                    onDismiss?.call();
+                  },
+                  child: Container(width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Continuer', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))),
                 ),
                 SizedBox(height: MediaQuery.of(context).padding.bottom + 16),
               ],
@@ -878,6 +894,11 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
       final name = _newNameController.text;
       final project = await _backend.createProject(name, _newDescController.text, apiKey: _apiKeyController.text, backendUrl: _backendUrlController.text);
       final projectId = project['id'] as String;
+      if (_backendUrlController.text.trim().isNotEmpty) {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool('has_backend', true);
+        if (mounted) setState(() => _hasBackend = true);
+      }
       // Add creator as admin member for this project
       final orgs = await _backend.getOrganizations();
       if (orgs.isNotEmpty) {
@@ -1298,27 +1319,19 @@ class _ProjectCard extends StatelessWidget {
                   if (project.status.isNotEmpty)
                     AnimatedSwitcher(
                       duration: const Duration(milliseconds: 500),
-                      child: Container(
+                      child: Row(
                         key: ValueKey(project.status),
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: _statusColor(project.statusType).withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(color: _statusColor(project.statusType).withOpacity(0.3)),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Container(width: 6, height: 6,
-                              decoration: BoxDecoration(
-                                color: _statusColor(project.statusType),
-                                shape: BoxShape.circle,
-                                boxShadow: [BoxShadow(color: _statusColor(project.statusType).withOpacity(0.5), blurRadius: 3)],
-                              )),
-                            const SizedBox(width: 6),
-                            Flexible(child: Text(project.status, style: TextStyle(fontSize: 11, color: _statusColor(project.statusType), fontWeight: FontWeight.w500), maxLines: 1, overflow: TextOverflow.ellipsis)),
-                          ],
-                        ),
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(width: 6, height: 6,
+                            decoration: BoxDecoration(
+                              color: _statusColor(project.statusType),
+                              shape: BoxShape.circle,
+                              boxShadow: [BoxShadow(color: _statusColor(project.statusType).withOpacity(0.5), blurRadius: 3)],
+                            )),
+                          const SizedBox(width: 6),
+                          Flexible(child: Text(project.status, style: TextStyle(fontSize: 13, color: _statusColor(project.statusType)), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                        ],
                       ),
                     )
                   else

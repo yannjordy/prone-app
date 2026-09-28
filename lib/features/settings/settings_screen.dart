@@ -59,6 +59,93 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  void _showVersion() {
+    _showInfoSheet(
+      'Version',
+      'Prone - Version 1.0.0\n\n'
+      'Build: 2026.09\n'
+      'Flutter: 3.44.1\n\n'
+      'Prone connecte vos backends (Supabase, REST API) a vos equipes '
+      'via des commandes en langage naturel.',
+    );
+  }
+
+  void _showTerms() {
+    _showInfoSheet(
+      'Conditions d\'utilisation',
+      '1. Prone est un outil d\'automatisation API reserve a un usage professionnel.\n\n'
+      '2. Vous etes responsable des cles API et des backends que vous connectez.\n\n'
+      '3. Les donnees sont stockees localement sur votre appareil.\n\n'
+      '4. Prone ne revend aucune donnee personnelle.\n\n'
+      '5. L\'utilisation abusive des quotas API peut entrainer la suspension du service.\n\n'
+      '6. En utilisant Prone, vous acceptez ces conditions.',
+    );
+  }
+
+  void _showPrivacy() {
+    _showInfoSheet(
+      'Politique de confidentialite',
+      'Collecte des donnees :\n\n'
+      '• Prone stocke vos donnees localement (SharedPreferences) sur votre appareil.\n'
+      '• Aucune donnee n\'est envoyee a des serveurs tiers sans votre accord.\n'
+      '• Les cles API sont stockees sur votre appareil et ne sont jamais partagees.\n\n'
+      'Vos droits :\n\n'
+      '• Consulter et modifier vos donnees depuis les parametres.\n'
+      '• Supprimer votre compte et vos donnees a tout moment.\n\n'
+      'Contact : support@prone.app',
+    );
+  }
+
+  void _showInfoSheet(String title, String body) {
+    final surfaceColor = ThemeHelper.surface(context);
+    final borderColor = ThemeHelper.borderLight(context);
+    final textColor = ThemeHelper.text(context);
+    final textDimColor = ThemeHelper.textDim(context);
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) => ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+          child: Container(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.7),
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: surfaceColor.withOpacity(0.97),
+              border: Border(top: BorderSide(color: borderColor)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: borderColor, borderRadius: BorderRadius.circular(2)))),
+                const SizedBox(height: 20),
+                Text(title, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: textColor)),
+                const SizedBox(height: 16),
+                Flexible(
+                  child: SingleChildScrollView(
+                    child: Text(body, style: TextStyle(fontSize: 14, height: 1.6, color: textDimColor)),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 14), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
+                    child: const Text('Fermer', style: TextStyle(fontWeight: FontWeight.w600)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final bgColor = ThemeHelper.bg(context);
@@ -179,9 +266,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ]),
                   const SizedBox(height: 16),
                   _SettingsSection(title: 'A propos', children: [
-                    _SettingsItem(icon: 'assets/icons/info.svg', label: 'Version', value: '1.0.0', onTap: () {}),
-                    _SettingsItem(icon: 'assets/icons/info.svg', label: 'Conditions d\'utilisation', onTap: () {}),
-                    _SettingsItem(icon: 'assets/icons/info.svg', label: 'Politique de confidentialite', onTap: () {}),
+                    _SettingsItem(icon: 'assets/icons/info.svg', label: 'Version', value: '1.0.0', onTap: _showVersion),
+                    _SettingsItem(icon: 'assets/icons/info.svg', label: 'Conditions d\'utilisation', onTap: _showTerms),
+                    _SettingsItem(icon: 'assets/icons/info.svg', label: 'Politique de confidentialite', onTap: _showPrivacy),
                   ]),
                   const SizedBox(height: 16),
                   _SettingsSection(title: 'Session', children: [

@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:go_router/go_router.dart';
 import 'dart:ui';
 import '../../app/app.dart';
+import '../../core/local/local_backend.dart';
 
 class ProjectConnectionsPage extends StatefulWidget {
   final String projectId;
@@ -12,17 +14,24 @@ class ProjectConnectionsPage extends StatefulWidget {
 }
 
 class _ProjectConnectionsPageState extends State<ProjectConnectionsPage> {
+  final _backend = LocalBackend();
   bool _showAddForm = false;
   final _urlController = TextEditingController();
   final _nameController = TextEditingController();
   final _keyController = TextEditingController();
 
-  final List<_Connection> _connections = [
-    _Connection(name: 'Production API', url: 'https://api.example.com', status: 'online', type: 'REST'),
-    _Connection(name: 'Staging API', url: 'https://staging.example.com', status: 'degraded', type: 'REST'),
-    _Connection(name: 'Auth Service', url: 'https://auth.example.com', status: 'online', type: 'REST'),
-    _Connection(name: 'Payment Gateway', url: 'https://payments.example.com', status: 'offline', type: 'REST'),
-  ];
+  List<Map<String, dynamic>> _connections = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadConnections();
+  }
+
+  Future<void> _loadConnections() async {
+    final conns = await _backend.getConnections(widget.projectId);
+    if (mounted) setState(() => _connections = conns);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -89,6 +98,15 @@ class _ProjectConnectionsPageState extends State<ProjectConnectionsPage> {
         ),
         child: Row(
           children: [
+            GestureDetector(
+              onTap: () => context.go('/projects/${widget.projectId}'),
+              child: Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.1), borderRadius: BorderRadius.circular(10)),
+                child: SvgPicture.asset('assets/icons/chevron-left.svg', width: 18, height: 18, colorFilter: const ColorFilter.mode(AppColors.primary, BlendMode.srcIn)),
+              ),
+            ),
+            const SizedBox(width: 10),
             SvgPicture.asset('assets/icons/connections.svg', width: 20, height: 20, colorFilter: const ColorFilter.mode(AppColors.primary, BlendMode.srcIn)),
             const SizedBox(width: 12),
             Text('CONNECTIONS', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, letterSpacing: 1, color: textDimColor)),
@@ -133,9 +151,24 @@ class _ProjectConnectionsPageState extends State<ProjectConnectionsPage> {
       itemCount: _connections.length,
       itemBuilder: (context, index) {
         final conn = _connections[index];
-        final statusColor = conn.status == 'online' ? AppColors.success : (conn.status == 'degraded' ? AppColors.warning : AppColors.error);
+        final status = (conn['status'] as String?) ?? 'connected';
+        final statusColor = status == 'online' || status == 'connected' ? AppColors.success : (status == 'degraded' ? AppColors.warning : AppColors.error);
 
-        return Container(
+        return Dismissible(
+          key: ValueKey(conn['id'] ?? index),
+          direction: DismissDirection.endToStart,
+          background: Container(
+            alignment: Alignment.centerRight,
+            padding: const EdgeInsets.only(right: 20),
+            margin: const EdgeInsets.only(bottom: 12),
+            decoration: BoxDecoration(color: AppColors.error, borderRadius: BorderRadius.circular(16)),
+            child: const Icon(Icons.delete, color: Colors.white),
+          ),
+          onDismissed: (_) async {
+            await _backend.deleteConnection(widget.projectId, conn['id'] as String);
+            _loadConnections();
+          },
+          child: Container(
           margin: const EdgeInsets.only(bottom: 12),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(16),
@@ -163,8 +196,8 @@ class _ProjectConnectionsPageState extends State<ProjectConnectionsPage> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(conn.name, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: textColor)),
-                          Text(conn.url, style: TextStyle(fontSize: 12, color: textDimColor), maxLines: 1, overflow: TextOverflow.ellipsis),
+                          Text((conn['name'] as String?) ?? 'Connexion', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: textColor)),
+                          Text((conn['url'] as String?) ?? '', style: TextStyle(fontSize: 12, color: textDimColor), maxLines: 1, overflow: TextOverflow.ellipsis),
                         ],
                       ),
                     ),
@@ -176,6 +209,7 @@ class _ProjectConnectionsPageState extends State<ProjectConnectionsPage> {
                 ),
               ),
             ),
+          ),
           ),
         );
       },
@@ -279,25 +313,20 @@ class _ProjectConnectionsPageState extends State<ProjectConnectionsPage> {
     );
   }
 
-  void _addConnection() {
+  void _addConnection() async {
     if (_nameController.text.isEmpty || _urlController.text.isEmpty) return;
+    await _backend.createConnection(widget.projectId, _nameController.text.trim(), _urlController.text.trim(), _keyController.text.trim());
+    if (!mounted) return;
     setState(() {
-      _connections.add(_Connection(name: _nameController.text, url: _urlController.text, status: 'online', type: 'REST'));
       _showAddForm = false;
       _nameController.clear();
       _urlController.clear();
       _keyController.clear();
     });
+    _loadConnections();
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: const Text('Backend connecté'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+      SnackBar(content: const Text('Backend connecté'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
     );
   }
-}
-
-class _Connection {
-  final String name;
-  final String url;
-  final String status;
-  final String type;
-  _Connection({required this.name, required this.url, required this.status, required this.type});
 }

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:typed_data';
 import 'dart:convert';
@@ -136,7 +137,7 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
         children: [
-          GestureDetector(onTap: () => Navigator.pop(context), child: SvgPicture.asset('assets/icons/chevron-left.svg', width: 20, height: 20, colorFilter: ColorFilter.mode(textColor, BlendMode.srcIn))),
+          GestureDetector(onTap: () => context.go('/projects/${widget.projectId}'), child: SvgPicture.asset('assets/icons/chevron-left.svg', width: 20, height: 20, colorFilter: ColorFilter.mode(textColor, BlendMode.srcIn))),
           const SizedBox(width: 12),
           Expanded(child: Text('Parametres', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor))),
           if (_isOldestAdmin)

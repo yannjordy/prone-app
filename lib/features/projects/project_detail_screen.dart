@@ -141,6 +141,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         _members.clear();
         _members.addAll(memberList);
         _userRole = (members.isNotEmpty ? (members.first['role'] as String?) : null) ?? 'admin';
+        _isAdmin = _userRole == 'admin';
       });
     }
     final msgs = await _backend.getMessages(widget.projectId);
@@ -152,6 +153,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
           sender: isBot ? _members.first : _currentUser!,
           text: (m['content'] as String?) ?? '',
           timestamp: DateTime.tryParse((m['created_at'] as String?) ?? '') ?? DateTime.now(),
+          id: (m['id'] as String?) ?? '',
         ));
       }
     });
@@ -349,6 +351,22 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                           setState(() => _showSettings = false);
                           context.go('/projects/${widget.projectId}/logs');
                         }),
+                        _SettingsItem(icon: 'actions.svg', label: 'Actions API', onTap: () {
+                          setState(() => _showSettings = false);
+                          context.go('/projects/${widget.projectId}/actions');
+                        }),
+                        _SettingsItem(icon: 'workflows.svg', label: 'Workflows', onTap: () {
+                          setState(() => _showSettings = false);
+                          context.go('/projects/${widget.projectId}/workflows');
+                        }),
+                        _SettingsItem(icon: 'webhooks.svg', label: 'Webhooks', onTap: () {
+                          setState(() => _showSettings = false);
+                          context.go('/projects/${widget.projectId}/webhooks');
+                        }),
+                        _SettingsItem(icon: 'executions.svg', label: 'Executions', onTap: () {
+                          setState(() => _showSettings = false);
+                          context.go('/projects/${widget.projectId}/executions');
+                        }),
                         Divider(color: ThemeHelper.borderLight(context), height: 1),
                         _SettingsItem(icon: 'settings.svg', label: 'Paramètres', onTap: () {
                           setState(() => _showSettings = false);
@@ -410,10 +428,14 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                             itemBuilder: (context, index) {
                               final cmd = filteredCommands[index];
                               return _MenuBtn(icon: cmd.icon, label: '/${cmd.name}', description: cmd.description, onTap: () {
-                                _controller.text = '/${cmd.name} ';
-                                _controller.selection = TextSelection.fromPosition(TextPosition(offset: _controller.text.length));
                                 setState(() => _showCommands = false);
-                                FocusScope.of(context).requestFocus(FocusNode());
+                                if (cmd.params == null || cmd.params!.isEmpty) {
+                                  _sendCommand('/${cmd.name}');
+                                } else {
+                                  _controller.text = '/${cmd.name} ';
+                                  _controller.selection = TextSelection.fromPosition(TextPosition(offset: _controller.text.length));
+                                  FocusScope.of(context).requestFocus(FocusNode());
+                                }
                               });
                             },
                           ),
@@ -1030,8 +1052,9 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                     Expanded(
                       child: GestureDetector(
                         onTap: () {
+                          Clipboard.setData(ClipboardData(text: inviteLink));
                           Navigator.pop(context);
-                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('QR Code partagé'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Lien d\'invitation copié ! Partagez-le.'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
                         },
                         child: Container(
                           padding: const EdgeInsets.symmetric(vertical: 14),
@@ -1102,9 +1125,12 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                     Expanded(
                       child: GestureDetector(
                         onTap: () {
+                          if (_projectApiKey.isNotEmpty) {
+                            Clipboard.setData(ClipboardData(text: _projectApiKey));
+                          }
                           Navigator.pop(context);
                           ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: const Text('API Key copiée !'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+                            SnackBar(content: Text(_projectApiKey.isNotEmpty ? 'API Key copiée !' : 'Aucune clé à copier'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
                           );
                         },
                         child: Container(
@@ -1479,10 +1505,16 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                       if (_isAdmin) ...[
                         const SizedBox(width: 14),
                         GestureDetector(
-                          onTap: () {
+                          onTap: () async {
+                            final idx = _selectedMessageIndex ?? 0;
+                            final msgId = _messages[idx].id;
                             Navigator.pop(ctx);
+                            if (msgId != null && msgId.isNotEmpty) {
+                              await _backend.deleteMessage(msgId);
+                            }
+                            if (!mounted) return;
                             setState(() {
-                              _messages.removeAt(_selectedMessageIndex ?? 0);
+                              _messages.removeAt(idx);
                               _selectedMessageIndex = null;
                             });
                             ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Message supprime'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
@@ -1569,11 +1601,14 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       } else if (cmd == 'schema') {
         if (args.isEmpty) return '❌ Usage: /schema <table>';
         return await _fetchSchema(args[0]);
+      } else if (cmd == 'table') {
+        if (args.isEmpty) return '❌ Usage: /table <nom>';
+        return await _fetchTable(args[0], limit: 20);
       }
       return '❌ Commande inconnue: "$command"\n\nTapez /help pour les commandes disponibles.';
     } catch (e) {
-      _updateProjectStatus('Erreur: \$e', 'error');
-      return '❌ Erreur backend: \$e';
+      _updateProjectStatus('Erreur: $e', 'error');
+      return '❌ Erreur backend: $e';
     }
   }
 
@@ -1715,28 +1750,28 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       if (!mounted) return;
       String response;
       final lower = command.toLowerCase().trim();
+      const dataCommands = ['/users', '/products', '/produits', '/orders', '/commandes',
+        '/count', '/last', '/search', '/schema', '/table'];
+      final matchesData = dataCommands.any((c) => lower == c || lower.startsWith('$c '));
 
-      if (_backendUrl.isEmpty) {
-        if (lower == '/help' || lower == '/aide') {
-          response = '🤖 Commandes Prone:\n\n/connect - Connecter un backend\n/status - Vérifier le backend\n/help - Aide\n\n⚠️ Connectez un backend pour utiliser /users, /products, etc.';
-        } else {
+      if (lower == '/help' || lower == '/aide') {
+        response = '🤖 Commandes Prone:\n\n/status - Vérifier le backend\n/test - Tester la connexion\n/tables - Lister les tables\n/users - Tous les utilisateurs\n/users <email> - Chercher par email\n/products - Tous les produits\n/count <table> - Compter\n/last <table> [n] - Dernières lignes\n/search <table> <champ> <valeur> - Rechercher\n/schema <table> - Structure\n/protect - Rapport sécurité\n/ping - Test de connexion\n/help - Aide';
+      } else if (lower == '/status' || lower == '/test' || lower == '/health') {
+        response = await _checkBackendStatus();
+      } else if (lower == '/tables') {
+        response = await _listTables();
+      } else if (lower == '/protect') {
+        response = _protector.getStatusReport();
+      } else if (matchesData) {
+        if (_backendUrl.isEmpty) {
           response = '⚠️ Aucun backend configuré.\n\nConnectez un backend dans les paramètres du projet pour utiliser les commandes de données.\n\nTapez /help pour les commandes disponibles.';
+        } else {
+          response = await _executeRealCommand(command);
         }
       } else {
-        final dataCommands = ['/users', '/products', '/produits', '/orders', '/commandes',
-          '/count', '/last', '/search', '/schema', '/table'];
-        final matchesData = dataCommands.any((c) => lower.startsWith(c));
-
-        if (matchesData) {
-          response = await _executeRealCommand(command);
-        } else if (lower == '/help' || lower == '/aide') {
-          response = '🤖 Commandes Prone:\n\n/status - Vérifier le backend\n/test - Tester la connexion\n/tables - Lister les tables\n/users - Tous les utilisateurs\n/users <email> - Chercher par email\n/products - Tous les produits\n/count <table> - Compter\n/last <table> [n] - Dernières lignes\n/search <table> <champ> <valeur> - Rechercher\n/schema <table> - Structure\n/protect - Rapport sécurité\n/help - Aide';
-        } else if (lower == '/status' || lower == '/test') {
-          response = await _checkBackendStatus();
-        } else if (lower == '/tables') {
-          response = await _listTables();
-        } else if (lower == '/protect') {
-          response = _protector.getStatusReport();
+        final libCmd = CommandLibrary.findCommand(lower);
+        if (libCmd != null) {
+          response = libCmd.execute(libCmd.currentParams).toString();
         } else {
           response = '❌ Commande inconnue: "$command"\n\nTapez /help pour voir les commandes disponibles.';
         }
@@ -1899,7 +1934,8 @@ class _ChatMessage {
   final int? replyToIndex;
   final MessageLevel level;
   final String? alertTitle;
-  _ChatMessage({required this.sender, required this.text, required this.timestamp, this.replyToIndex, this.level = MessageLevel.info, this.alertTitle});
+  final String? id;
+  _ChatMessage({required this.sender, required this.text, required this.timestamp, this.replyToIndex, this.level = MessageLevel.info, this.alertTitle, this.id});
 }
 
 class _SettingsItem extends StatelessWidget {

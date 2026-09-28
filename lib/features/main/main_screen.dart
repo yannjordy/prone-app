@@ -26,7 +26,7 @@ class _MainScreenState extends State<MainScreen> {
     final path = GoRouterState.of(context).uri.path;
     final isMobile = MediaQuery.of(context).size.width < 768;
     final isProjectDetail = path.startsWith('/projects/') && path.split('/').length > 2;
-    final isOrgDetail = path == '/organization';
+    final isOrgDetail = path.startsWith('/organization/');
 
     if (isMobile) {
       return _MobileLayout(currentPath: path, child: widget.child, hideNav: isProjectDetail || isOrgDetail, notifService: _notifService);
@@ -250,7 +250,7 @@ class _NavigationRailState extends State<_NavigationRail> {
             onTap: () => context.go('/settings'),
           ),
           const SizedBox(height: 12),
-          const _AnimatedAvatar(),
+          GestureDetector(onTap: () => context.go('/profile'), child: const _AnimatedAvatar()),
           const SizedBox(height: 12),
         ],
       ),

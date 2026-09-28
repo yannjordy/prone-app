@@ -145,6 +145,10 @@ class LocalBackend {
     return msg;
   }
 
+  Future<void> deleteMessage(String messageId) async {
+    await _db.delete('messages', where: 'id = ?', whereArgs: [messageId]);
+  }
+
 
   Future<List<Map<String, dynamic>>> getConnections(String projectId) async {
     return await _db.query('connections', where: 'project_id = ?', whereArgs: [projectId]);
@@ -189,6 +193,28 @@ class LocalBackend {
 
   Future<void> deleteWebhook(String projectId, String webhookId) async {
     await _db.delete('webhooks', where: 'id = ?', whereArgs: [webhookId]);
+  }
+
+  Future<void> updateWebhook(String webhookId, Map<String, dynamic> updates) async {
+    await _db.update('webhooks', updates, where: 'id = ?', whereArgs: [webhookId]);
+  }
+
+  Future<void> updateWorkflow(String workflowId, Map<String, dynamic> updates) async {
+    await _db.update('workflows', updates, where: 'id = ?', whereArgs: [workflowId]);
+  }
+
+  Future<void> updateConnection(String connectionId, Map<String, dynamic> updates) async {
+    await _db.update('connections', updates, where: 'id = ?', whereArgs: [connectionId]);
+  }
+
+  Future<Map<String, dynamic>> addExecution(String projectId, String name, String status, {String? duration}) async {
+    final id = _uuid.v4();
+    final exec = {
+      'id': id, 'project_id': projectId, 'name': name, 'status': status,
+      'duration': duration ?? '', 'created_at': DateTime.now().toIso8601String(),
+    };
+    await _db.insert('executions', exec);
+    return exec;
   }
 
   Future<List<Map<String, dynamic>>> getActions(String projectId) async {

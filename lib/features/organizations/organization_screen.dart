@@ -2,8 +2,10 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../app/app.dart';
 import '../../core/local/local_backend.dart';
 import '../../core/utils/photo_picker_helper.dart';
@@ -24,12 +26,63 @@ class _OrganizationScreenState extends State<OrganizationScreen> {
   Map<String, dynamic>? _org;
   List<Map<String, dynamic>> _members = [];
   List<Map<String, dynamic>> _projects = [];
+  List<Map<String, dynamic>> _apiKeys = [];
   bool _isLoading = true;
 
   @override
   void initState() {
     super.initState();
     _loadData();
+    _loadApiKeys();
+  }
+
+  Future<void> _loadApiKeys() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('org_api_keys_${widget.orgId}');
+    List<Map<String, dynamic>> keys = [];
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        keys = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+      } catch (_) {}
+    }
+    if (keys.isEmpty) {
+      keys = [
+        {'key': 'prd_org_${widget.orgId.substring(0, widget.orgId.length.clamp(0, 8))}', 'label': 'Organisation', 'active': true},
+      ];
+      await _saveApiKeys(keys);
+    }
+    if (mounted) setState(() => _apiKeys = keys);
+  }
+
+  Future<void> _saveApiKeys(List<Map<String, dynamic>> keys) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('org_api_keys_${widget.orgId}', jsonEncode(keys));
+  }
+
+  String _generateApiKey() {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    final rnd = DateTime.now().microsecondsSinceEpoch;
+    var out = '';
+    var n = rnd;
+    for (var i = 0; i < 16; i++) {
+      out += chars[n % chars.length];
+      n = n ~/ chars.length + i * 31 + 7;
+    }
+    return 'prd_$out';
+  }
+
+  Future<void> _regenerateApiKey() async {
+    final newKey = {
+      'key': _generateApiKey(),
+      'label': 'Cle ${_apiKeys.length + 1}',
+      'active': true,
+    };
+    final keys = [..._apiKeys, newKey];
+    await _saveApiKeys(keys);
+    if (!mounted) return;
+    setState(() => _apiKeys = keys);
+    Navigator.pop(context);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Nouvelle API key générée: ${newKey['key']}'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
   }
 
   Future<void> _loadData() async {
@@ -458,11 +511,14 @@ class _OrganizationScreenState extends State<OrganizationScreen> {
     );
   }
 
-  void _openNotificationSettings() {
-    bool backendAlerts = true;
-    bool memberAlerts = true;
-    bool securityAlerts = true;
-    bool chatMessages = false;
+  void _openNotificationSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    final p = 'org_notif_${widget.orgId}_';
+    bool backendAlerts = prefs.getBool('${p}backend') ?? true;
+    bool memberAlerts = prefs.getBool('${p}members') ?? true;
+    bool securityAlerts = prefs.getBool('${p}security') ?? true;
+    bool chatMessages = prefs.getBool('${p}chat') ?? false;
+    if (!mounted) return;
     final surfaceColor = ThemeHelper.surface(context);
     final borderColor = ThemeHelper.borderLight(context);
     final textColor = ThemeHelper.text(context);
@@ -494,7 +550,16 @@ class _OrganizationScreenState extends State<OrganizationScreen> {
                   _buildToggle('Messages chat', 'Notifications des messages', chatMessages, (v) => setSheetState(() => chatMessages = v)),
                   const SizedBox(height: 20),
                   GestureDetector(
-                    onTap: () => Navigator.pop(context),
+                    onTap: () async {
+                      final sp = await SharedPreferences.getInstance();
+                      await sp.setBool('${p}backend', backendAlerts);
+                      await sp.setBool('${p}members', memberAlerts);
+                      await sp.setBool('${p}security', securityAlerts);
+                      await sp.setBool('${p}chat', chatMessages);
+                      if (!context.mounted) return;
+                      Navigator.pop(context);
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Notifications sauvegardées'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                    },
                     child: Container(
                       width: double.infinity,
                       padding: const EdgeInsets.symmetric(vertical: 14),
@@ -584,11 +649,11 @@ class _OrganizationScreenState extends State<OrganizationScreen> {
                 }),
                 _buildSecurityOption('Authentification a deux facteurs (2FA)', 'Securite renforcee pour votre compte', () {
                   Navigator.pop(context);
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('2FA configure avec succes'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                  _showTwoFactorSheet();
                 }),
                 _buildSecurityOption('Historique des connexions', 'Voir les dernières connexions', () {
                   Navigator.pop(context);
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Aucune connexion recente'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                  _showLoginHistorySheet();
                 }),
                 const SizedBox(height: 16),
               ],
@@ -666,18 +731,188 @@ class _OrganizationScreenState extends State<OrganizationScreen> {
                     Expanded(child: GestureDetector(onTap: () => Navigator.pop(context), child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)), child: Center(child: Text('Annuler', style: TextStyle(color: textDimColor, fontSize: 14)))))),
                     const SizedBox(width: 12),
                     Expanded(child: GestureDetector(
-                      onTap: () {
-                        if (newPassController.text == confirmPassController.text && newPassController.text.isNotEmpty) {
-                          Navigator.pop(context);
-                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Mot de passe change avec succes'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
-                        } else {
-                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Les mots de passe ne correspondent pas'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                      onTap: () async {
+                        if (newPassController.text.isEmpty || newPassController.text.length < 6) {
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Le mot de passe doit faire au moins 6 caracteres'), backgroundColor: AppColors.error));
+                          return;
                         }
+                        if (newPassController.text != confirmPassController.text) {
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Les mots de passe ne correspondent pas'), backgroundColor: AppColors.error));
+                          return;
+                        }
+                        final prefs = await SharedPreferences.getInstance();
+                        final savedPass = prefs.getString('profile_password') ?? '';
+                        if (savedPass.isNotEmpty && oldPassController.text != savedPass) {
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Mot de passe actuel incorrect'), backgroundColor: AppColors.error));
+                          return;
+                        }
+                        await prefs.setString('profile_password', newPassController.text);
+                        if (!context.mounted) return;
+                        Navigator.pop(context);
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Mot de passe change avec succes'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
                       },
                       child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Changer', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))),
                     )),
                   ],
                 ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showTwoFactorSheet() async {
+    final prefs = await SharedPreferences.getInstance();
+    final enabled = prefs.getBool('profile_2fa_enabled') ?? false;
+    final code = (prefs.getString('profile_2fa_code') ?? '').isEmpty ? _generateApiKey().substring(4, 10).toUpperCase() : prefs.getString('profile_2fa_code')!;
+    await prefs.setString('profile_2fa_code', code);
+    if (!mounted) return;
+    final surfaceColor = ThemeHelper.surface(context);
+    final borderColor = ThemeHelper.borderLight(context);
+    final textColor = ThemeHelper.text(context);
+    final textDimColor = ThemeHelper.textDim(context);
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => ClipRRect(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+            child: Container(
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(color: surfaceColor.withOpacity(0.95), borderRadius: const BorderRadius.vertical(top: Radius.circular(24))),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(width: 40, height: 4, decoration: BoxDecoration(color: borderColor, borderRadius: BorderRadius.circular(2))),
+                  const SizedBox(height: 20),
+                  Text('Authentification a deux facteurs', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
+                  const SizedBox(height: 8),
+                  Text(enabled ? 'La 2FA est active sur votre compte.' : 'Ajoutez une couche de securite en demandant un code a chaque connexion.', style: TextStyle(fontSize: 13, color: textDimColor)),
+                  const SizedBox(height: 20),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(color: ThemeHelper.bg(ctx), borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)),
+                    child: Column(
+                      children: [
+                        Text('Code de recuperation', style: TextStyle(fontSize: 12, color: textDimColor)),
+                        const SizedBox(height: 8),
+                        Text(code, style: const TextStyle(fontSize: 22, letterSpacing: 4, fontWeight: FontWeight.w700, color: AppColors.primary, fontFamily: 'monospace')),
+                        const SizedBox(height: 8),
+                        GestureDetector(
+                          onTap: () {
+                            Clipboard.setData(ClipboardData(text: code));
+                            ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: const Text('Code copie !'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                          },
+                          child: Row(mainAxisSize: MainAxisSize.min, mainAxisAlignment: MainAxisAlignment.center, children: [
+                            SvgPicture.asset('assets/icons/copy.svg', width: 14, height: 14, colorFilter: const ColorFilter.mode(AppColors.primary, BlendMode.srcIn)),
+                            const SizedBox(width: 6),
+                            Text('Copier le code', style: TextStyle(fontSize: 13, color: AppColors.primary, fontWeight: FontWeight.w600)),
+                          ]),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  GestureDetector(
+                    onTap: () async {
+                      await prefs.setBool('profile_2fa_enabled', !enabled);
+                      if (!ctx.mounted) return;
+                      setSheetState(() {});
+                      ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text(enabled ? '2FA desactivee' : '2FA activee avec succes'), backgroundColor: enabled ? AppColors.primary : AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                    },
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)),
+                      child: Center(child: Text(enabled ? 'Desactiver la 2FA' : 'Activer la 2FA', style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600))),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showLoginHistorySheet() async {
+    final prefs = await SharedPreferences.getInstance();
+    final history = prefs.getStringList('profile_login_history') ?? [];
+    if (!mounted) return;
+    final surfaceColor = ThemeHelper.surface(context);
+    final borderColor = ThemeHelper.borderLight(context);
+    final textColor = ThemeHelper.text(context);
+    final textDimColor = ThemeHelper.textDim(context);
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) => ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+          child: Container(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.6),
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(color: surfaceColor.withOpacity(0.95), borderRadius: const BorderRadius.vertical(top: Radius.circular(24))),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(width: 40, height: 4, decoration: BoxDecoration(color: borderColor, borderRadius: BorderRadius.circular(2))),
+                const SizedBox(height: 20),
+                Text('Historique des connexions', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
+                const SizedBox(height: 16),
+                if (history.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 20),
+                    child: Center(child: Text('Aucune connexion enregistree', style: TextStyle(fontSize: 14, color: textDimColor))),
+                  )
+                else
+                  Flexible(
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: history.length,
+                      itemBuilder: (ctx2, i) {
+                        final parts = history[i].split('|');
+                        return Container(
+                          margin: const EdgeInsets.only(bottom: 8),
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(color: ThemeHelper.bg(ctx).withOpacity(0.5), borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)),
+                          child: Row(children: [
+                            Container(width: 8, height: 8, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
+                            const SizedBox(width: 12),
+                            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              Text(parts.length > 1 ? parts[1] : 'Connexion', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: textColor)),
+                              Text(parts.length > 0 ? parts[0] : '', style: TextStyle(fontSize: 12, color: textDimColor)),
+                            ])),
+                          ]),
+                        );
+                      },
+                    ),
+                  ),
+                const SizedBox(height: 16),
+                GestureDetector(
+                  onTap: () => Navigator.pop(ctx),
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    decoration: BoxDecoration(color: ThemeHelper.bg(ctx), borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)),
+                    child: Center(child: Text('Fermer', style: TextStyle(color: textDimColor, fontSize: 14))),
+                  ),
+                ),
+                const SizedBox(height: 8),
               ],
             ),
           ),
@@ -713,10 +948,7 @@ class _OrganizationScreenState extends State<OrganizationScreen> {
                   children: [
                     Expanded(child: Text('API Keys', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor))),
                     GestureDetector(
-                      onTap: () {
-                        Navigator.pop(context);
-                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Nouvelle API key generee'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
-                      },
+                      onTap: () => _regenerateApiKey(),
                       child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                         decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.1), borderRadius: BorderRadius.circular(8)),
@@ -733,9 +965,8 @@ class _OrganizationScreenState extends State<OrganizationScreen> {
                   ],
                 ),
                 const SizedBox(height: 16),
-                _buildApiKeyItem('prd_org_' + widget.orgId.substring(0, 8), 'Organisation', true),
-                _buildApiKeyItem('prd_proj_' + 'abc12345', 'Projets', true),
-                _buildApiKeyItem('prd_read_' + 'xyz67890', 'Lecture seule', false),
+                for (final k in _apiKeys)
+                  _buildApiKeyItem(k['key'] as String, k['label'] as String? ?? 'Cle', k['active'] == true),
                 const SizedBox(height: 16),
               ],
             ),
@@ -771,7 +1002,8 @@ class _OrganizationScreenState extends State<OrganizationScreen> {
           ),
           GestureDetector(
             onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('API key copiee'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+              Clipboard.setData(ClipboardData(text: key));
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('API key copiée !'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
             },
             child: Container(
               padding: const EdgeInsets.all(6),

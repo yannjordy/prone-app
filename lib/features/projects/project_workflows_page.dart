@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:go_router/go_router.dart';
 import 'dart:ui';
 import '../../app/app.dart';
+import '../../core/local/local_backend.dart';
 
 class ProjectWorkflowsPage extends StatefulWidget {
   final String projectId;
@@ -12,12 +14,24 @@ class ProjectWorkflowsPage extends StatefulWidget {
 }
 
 class _ProjectWorkflowsPageState extends State<ProjectWorkflowsPage> {
-  final List<_Workflow> _workflows = [
-    _Workflow(name: 'User Registration', steps: ['validate', 'create', 'email'], status: 'active', lastRun: '2 min'),
-    _Workflow(name: 'Order Processing', steps: ['validate', 'payment', 'inventory', 'notify'], status: 'active', lastRun: '15 min'),
-    _Workflow(name: 'Daily Backup', steps: ['export', 'compress', 'upload'], status: 'scheduled', lastRun: '12h'),
-    _Workflow(name: 'Email Notifications', steps: ['template', 'send'], status: 'paused', lastRun: '3j'),
-  ];
+  final _backend = LocalBackend();
+  List<Map<String, dynamic>> _workflows = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadWorkflows();
+  }
+
+  Future<void> _loadWorkflows() async {
+    var wfs = await _backend.getWorkflows(widget.projectId);
+    if (wfs.isEmpty) {
+      await _backend.createWorkflow(widget.projectId, 'User Registration', 'validate -> create -> email');
+      await _backend.createWorkflow(widget.projectId, 'Order Processing', 'validate -> payment -> notify');
+      wfs = await _backend.getWorkflows(widget.projectId);
+    }
+    if (mounted) setState(() => _workflows = wfs);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -46,6 +60,15 @@ class _ProjectWorkflowsPageState extends State<ProjectWorkflowsPage> {
         ),
         child: Row(
           children: [
+            GestureDetector(
+              onTap: () => context.go('/projects/${widget.projectId}'),
+              child: Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.1), borderRadius: BorderRadius.circular(10)),
+                child: SvgPicture.asset('assets/icons/chevron-left.svg', width: 18, height: 18, colorFilter: const ColorFilter.mode(AppColors.primary, BlendMode.srcIn)),
+              ),
+            ),
+            const SizedBox(width: 10),
             SvgPicture.asset('assets/icons/workflows.svg', width: 20, height: 20, colorFilter: const ColorFilter.mode(AppColors.primary, BlendMode.srcIn)),
             const SizedBox(width: 12),
             Text('WORKFLOWS', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, letterSpacing: 1, color: ThemeHelper.textDim(context))),
@@ -65,27 +88,63 @@ class _ProjectWorkflowsPageState extends State<ProjectWorkflowsPage> {
   }
 
   Widget _buildWorkflowsList() {
+    if (_workflows.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SvgPicture.asset('assets/icons/workflows.svg', width: 48, height: 48, colorFilter: ColorFilter.mode(ThemeHelper.textDim(context), BlendMode.srcIn)),
+            const SizedBox(height: 16),
+            Text('Aucun workflow', style: TextStyle(fontSize: 16, color: ThemeHelper.textDim(context))),
+          ],
+        ),
+      );
+    }
     return ListView.builder(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       itemCount: _workflows.length,
       itemBuilder: (context, index) {
         final wf = _workflows[index];
+        final steps = ((wf['description'] as String?) ?? '').split('->').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
         return _WorkflowCard(
-          workflow: wf,
+          name: (wf['name'] as String?) ?? 'Workflow',
+          status: (wf['status'] as String?) ?? 'active',
+          steps: steps.isEmpty ? ['start', 'end'] : steps,
+          lastRun: (wf['created_at'] as String?) ?? 'jamais',
           onRun: () => _runWorkflow(wf),
-          onToggle: () => setState(() {
-            wf.status = wf.status == 'active' ? 'paused' : 'active';
-          }),
+          onToggle: () => _toggleWorkflow(wf),
+          onDelete: () async {
+            await _backend.deleteWorkflow(widget.projectId, wf['id'] as String);
+            _loadWorkflows();
+          },
         );
       },
     );
   }
 
-  void _runWorkflow(_Workflow wf) {
+  void _toggleWorkflow(Map<String, dynamic> wf) async {
+    final newStatus = wf['status'] == 'active' ? 'paused' : 'active';
+    await _backend.updateWorkflow(wf['id'] as String, {'status': newStatus});
+    _loadWorkflows();
+  }
+
+  void _runWorkflow(Map<String, dynamic> wf) async {
+    final name = (wf['name'] as String?) ?? 'Workflow';
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('Exécution de "${wf.name}"...'),
+        content: Text('Exécution de "$name"...'),
         backgroundColor: AppColors.primary,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
+    await _backend.addExecution(widget.projectId, name, 'success', duration: '${(name.length * 137) % 3000}ms');
+    await _backend.addLog(widget.projectId, 'info', 'Workflow "$name" execute avec succes');
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('"$name" exécuté avec succès'),
+        backgroundColor: AppColors.success,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),
@@ -93,23 +152,19 @@ class _ProjectWorkflowsPageState extends State<ProjectWorkflowsPage> {
   }
 }
 
-class _Workflow {
-  final String name;
-  final List<String> steps;
-  String status;
-  final String lastRun;
-  _Workflow({required this.name, required this.steps, required this.status, required this.lastRun});
-}
-
 class _WorkflowCard extends StatelessWidget {
-  final _Workflow workflow;
+  final String name;
+  final String status;
+  final List<String> steps;
+  final String lastRun;
   final VoidCallback onRun;
   final VoidCallback onToggle;
+  final VoidCallback onDelete;
 
-  const _WorkflowCard({required this.workflow, required this.onRun, required this.onToggle});
+  const _WorkflowCard({required this.name, required this.status, required this.steps, required this.lastRun, required this.onRun, required this.onToggle, required this.onDelete});
 
   Color _statusColor(BuildContext context) {
-    switch (workflow.status) {
+    switch (status) {
       case 'active': return AppColors.success;
       case 'scheduled': return AppColors.primary;
       case 'paused': return AppColors.warning;
@@ -153,9 +208,9 @@ class _WorkflowCard extends StatelessWidget {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(workflow.name, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: ThemeHelper.text(context))),
+                          Text(name, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: ThemeHelper.text(context))),
                           const SizedBox(height: 2),
-                          Text('Dernière exécution: ${workflow.lastRun}', style: TextStyle(fontSize: 12, color: ThemeHelper.textDim(context))),
+                          Text('Dernière exécution: ${lastRun}', style: TextStyle(fontSize: 12, color: ThemeHelper.textDim(context))),
                         ],
                       ),
                     ),
@@ -174,10 +229,10 @@ class _WorkflowCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 12),
                 Row(
-                  children: workflow.steps.asMap().entries.map((entry) {
+                  children: steps.asMap().entries.map((entry) {
                     final i = entry.key;
                     final step = entry.value;
-                    final isLast = i == workflow.steps.length - 1;
+                    final isLast = i == steps.length - 1;
                     return Expanded(
                       child: Row(
                         children: [
@@ -213,12 +268,25 @@ class _WorkflowCard extends StatelessWidget {
                         color: _statusColor(context).withOpacity(0.15),
                         borderRadius: BorderRadius.circular(6),
                       ),
-                      child: Text(workflow.status.toUpperCase(), style: TextStyle(fontSize: 10, color: _statusColor(context), fontWeight: FontWeight.w600)),
+                      child: Text(status.toUpperCase(), style: TextStyle(fontSize: 10, color: _statusColor(context), fontWeight: FontWeight.w600)),
                     ),
                     const Spacer(),
                     GestureDetector(
                       onTap: onToggle,
-                      child: SvgPicture.asset(workflow.status == 'active' ? 'assets/icons/log-out.svg' : 'assets/icons/arrow-right.svg', width: 16, height: 16, colorFilter: ColorFilter.mode(ThemeHelper.textDim(context), BlendMode.srcIn)),
+                      child: Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(8), border: Border.all(color: ThemeHelper.borderLight(context))),
+                        child: SvgPicture.asset(status == 'active' ? 'assets/icons/mute.svg' : 'assets/icons/zap.svg', width: 14, height: 14, colorFilter: ColorFilter.mode(_statusColor(context), BlendMode.srcIn)),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    GestureDetector(
+                      onTap: onDelete,
+                      child: Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(8), border: Border.all(color: ThemeHelper.borderLight(context))),
+                        child: SvgPicture.asset('assets/icons/trash.svg', width: 14, height: 14, colorFilter: const ColorFilter.mode(AppColors.error, BlendMode.srcIn)),
+                      ),
                     ),
                   ],
                 ),
