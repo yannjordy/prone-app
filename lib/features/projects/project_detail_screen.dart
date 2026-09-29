@@ -1367,8 +1367,9 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                       const SizedBox(height: 8),
                       Row(
                         children: [
-                          _buildRoleChip('Admin', 'Admin', selectedRole, (v) => setSheetState(() => selectedRole = v)),
-                          const SizedBox(width: 8),
+                          if (_userRole == 'admin')
+                            _buildRoleChip('Admin', 'Admin', selectedRole, (v) => setSheetState(() => selectedRole = v)),
+                          if (_userRole == 'admin') const SizedBox(width: 8),
                           _buildRoleChip('Éditeur', 'Membre', selectedRole, (v) => setSheetState(() => selectedRole = v)),
                           const SizedBox(width: 8),
                           _buildRoleChip('Lecteur', 'Lecteur', selectedRole, (v) => setSheetState(() => selectedRole = v)),
@@ -1387,7 +1388,9 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                             final email = emailController.text.trim();
                             final name = email.split('@')[0];
                             final roleMap = {'Admin': 'admin', 'Membre': 'editor', 'Lecteur': 'viewer'};
-                            final role = roleMap[selectedRole] ?? 'viewer';
+                            var role = roleMap[selectedRole] ?? 'viewer';
+                            // Seul un administrateur peut attribuer le grade admin.
+                            if (_userRole != 'admin' && role == 'admin') role = 'editor';
                             final orgs = await _backend.getOrganizations();
                             if (orgs.isNotEmpty) {
                               await _backend.addMember(orgs.first['id'] as String, name, email, role, projectId: widget.projectId);
@@ -2557,8 +2560,8 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
 
       case 'user':
         if (!_ensureBackend()) return _noBackendMsg;
-        if (args.isEmpty) return '❌ Usage: /user <id>';
-        return await _fetchTableRow('users', args[0]);
+        if (args.isEmpty) return '❌ Usage: /user <email ou id>';
+        return await _fetchUserProfile(args[0]);
 
       case 'insert':
         if (!_ensureBackend()) return _noBackendMsg;
@@ -2754,21 +2757,68 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     return buf.toString().trimRight();
   }
 
-  Future<String> _fetchTableRow(String table, String id) async {
-    final res = await BackendAdapter.fetchRows(_backendUrl, _projectApiKey, table,
-        limit: 1, offset: 0, type: _backendType, searchField: 'id', searchValue: id);
-    if (!res.ok) {
+  /// Tables pouvant contenir des utilisateurs, par ordre de priorite.
+  static const _userTables = <String>[
+    'users', 'user', 'profiles', 'profile', 'members', 'membres',
+    'accounts', 'account', 'clients', 'contacts', 'people', 'personnes',
+  ];
+
+  Future<List<String>> _listBackendTables() async {
+    try {
+      return await BackendAdapter.listTables(_backendUrl, _projectApiKey, type: _backendType);
+    } catch (_) {
+      return const <String>[];
+    }
+  }
+
+  /// Le schema n'est pas universel : Supabase a souvent `profiles`, un
+  /// backend Express a `users`. Figer `users` donnait un 404 systématique.
+  Future<String?> _resolveUserTable([List<String>? tables]) async {
+    final list = tables ?? await _listBackendTables();
+    final lower = list.map((t) => t.toLowerCase().trim()).toList();
+    for (final candidate in _userTables) {
+      final i = lower.indexOf(candidate);
+      if (i >= 0) return list[i];
+    }
+    return null;
+  }
+
+  Future<String> _fetchUserProfile(String key) async {
+    final tables = await _listBackendTables();
+    final table = await _resolveUserTable(tables);
+    if (table == null) {
+      final available = tables.take(10).join(', ');
+      return '❌ Aucune table utilisateur trouvée sur ce backend.'
+          '${available.isEmpty ? '' : '\n\nTables disponibles: $available'}'
+          '\n\nTapez /tables pour la liste complète.';
+    }
+
+    // Un email se cherche sur la colonne `email`, un identifiant sur `id`.
+    // Si la colonne n'existe pas, PostgREST renvoie 400 : on passe au champ
+    // suivant au lieu d'afficher une erreur au hasard.
+    final fields = key.contains('@') ? const <String>['email', 'id'] : const <String>['id', 'email'];
+    for (final field in fields) {
+      final res = await BackendAdapter.fetchRows(
+        _backendUrl,
+        _projectApiKey,
+        table,
+        limit: 1,
+        offset: 0,
+        type: _backendType,
+        searchField: field,
+        searchValue: key,
+      );
       if (res.offline) {
         _lastCmdOffline = true;
-        return '⚠️ Hors ligne — impossible de lire #$id.';
+        return '⚠️ Hors ligne — impossible de lire "$key".';
       }
-      return '❌ Erreur ${res.error}';
+      if (!res.ok || res.rows.isEmpty) continue;
+      final row = res.rows.first;
+      final buf = StringBuffer('👤 $table · $key\n\n');
+      row.forEach((k, v) => buf.writeln('$k: $v'));
+      return buf.toString().trimRight();
     }
-    if (res.rows.isEmpty) return '🔍 Aucune ligne avec id="$id" dans "$table".';
-    final row = res.rows.first;
-    final buf = StringBuffer('👤 $table #$id\n\n');
-    row.forEach((k, v) => buf.writeln('$k: $v'));
-    return buf.toString().trimRight();
+    return '🔍 Aucun utilisateur avec "$key" dans "$table".';
   }
 
   Future<String> _environmentName() async {

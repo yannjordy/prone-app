@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -8,6 +10,7 @@ import 'dart:convert';
 import 'dart:ui';
 import 'dart:math';
 import '../../app/app.dart';
+import '../../core/deep_link/deep_links.dart';
 import '../../core/local/local_backend.dart';
 import '../../core/backend/backend_adapter.dart';
 import '../../core/backend/invite_payload.dart';
@@ -46,6 +49,8 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
   bool _isVerifying = false;
   String? _verifyFaviconUrl;
   late final AnimationController _verifyingAnimController;
+  StreamSubscription<String>? _deepLinkSub;
+  String? _lastImportedLink;
 
   @override
   void initState() {
@@ -55,10 +60,27 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
     _loadBackendStatus();
     _loadProjects();
     _notifService.addListener(() => setState(() {}));
+    // Lien ouvert depuis l'exterieur (cold start ou application en tache de fond).
+    _deepLinkSub = DeepLinks.instance.joinLinks.listen(_onDeepLink);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final initial = DeepLinks.instance.initialLink;
+      if (initial != null) _onDeepLink(initial);
+    });
+  }
+
+  void _onDeepLink(String link) {
+    if (!mounted || link.isEmpty) return;
+    // Le meme lien arrive parfois du getInitialLink et du stream : on
+    // n'ouvre la boite de reunion qu'une seule fois.
+    if (_lastImportedLink == link) return;
+    _lastImportedLink = link;
+    DeepLinks.instance.markInitialHandled();
+    _runImportAnimation(link);
   }
 
   @override
   void dispose() {
+    _deepLinkSub?.cancel();
     _verifyingAnimController.dispose();
     _searchController.dispose();
     _newNameController.dispose();

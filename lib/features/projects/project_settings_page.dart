@@ -38,8 +38,10 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
   late TabController _tabController;
   List<Map<String, dynamic>> _members = [];
   bool _membersLoading = true;
-  String _currentUserRole = 'admin';
-  bool _isOldestAdmin = true;
+  // Tant que le role n'est pas resolu on se croit lecteur : jamais admin
+  // "par defaut", ce serait une elevation de privilege silencieuse.
+  String _currentUserRole = 'viewer';
+  bool _isOldestAdmin = false;
   bool _tablesPresent = true;
   String? _syncError;
   SyncStats? _syncStats;
@@ -179,17 +181,42 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
       return dateA.compareTo(dateB);
     });
     String myId = '';
+    SharedPreferences? prefs;
     try {
-      final prefs = await SharedPreferences.getInstance();
-      myId = prefs.getString('member_id_${widget.projectId}') ?? '';
+      prefs = await SharedPreferences.getInstance();
+      myId = prefs?.getString('member_id_${widget.projectId}') ?? '';
     } catch (_) {}
-    final me = myId.isNotEmpty
+
+    var me = myId.isNotEmpty
         ? members.firstWhere((m) => (m['id'] as String?) == myId, orElse: () => <String, dynamic>{})
         : <String, dynamic>{};
-    final fallback = members.isNotEmpty ? members.first : <String, dynamic>{};
+
+    if (me.isEmpty) {
+      // Repli sur l'identite partagee. Surtout pas members.first : la liste
+      // est triee admin en premier, un simple membre aurait recu tous les
+      // droits (changement de grade, copie de la cle API, ...).
+      final profile = await UserProfile.load();
+      final email = (profile['email'] ?? '').trim().toLowerCase();
+      final name = (profile['name'] ?? '').trim().toLowerCase();
+      if (email.isNotEmpty) {
+        me = members.firstWhere((m) => ((m['email'] as String?) ?? '').trim().toLowerCase() == email, orElse: () => <String, dynamic>{});
+      }
+      if (me.isEmpty && name.isNotEmpty) {
+        me = members.firstWhere((m) => ((m['name'] as String?) ?? '').trim().toLowerCase() == name, orElse: () => <String, dynamic>{});
+      }
+      if (me.isEmpty && members.length == 1) {
+        // Seul membre du projet : c'est forcement cet appareil.
+        me = members.first;
+      }
+      final recovered = (me['id'] as String?) ?? '';
+      if (recovered.isNotEmpty && prefs != null) {
+        try { await prefs.setString('member_id_${widget.projectId}', recovered); } catch (_) {}
+      }
+    }
+
     if (mounted) setState(() {
       _members = members;
-      _currentUserRole = (me['role'] as String?) ?? (fallback['role'] as String?) ?? 'viewer';
+      _currentUserRole = (me['role'] as String?) ?? 'viewer';
       _isOldestAdmin = _currentUserRole == 'admin';
       _membersLoading = false;
     });
@@ -763,7 +790,9 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
                   const SizedBox(height: 16),
                   Text('Role', style: TextStyle(fontSize: 12, color: textDimColor)),
                   const SizedBox(height: 8),
-                  Row(children: ['admin', 'editor', 'viewer'].map((r) {
+                  Row(children: (['admin', 'editor', 'viewer']
+                          .where((r) => r != 'admin' || _currentUserRole == 'admin'))
+                      .map((r) {
                     final isSelected = selectedRole == r;
                     final rColor = r == 'admin' ? AppColors.error : r == 'editor' ? AppColors.primary : AppColors.success;
                     final label = r == 'admin' ? 'Admin' : r == 'editor' ? 'Membre' : 'Lecteur';
@@ -1068,12 +1097,16 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
                 Navigator.pop(ctx);
                 _showMemberProfile(member, surfaceColor, borderColor, textColor, textDimColor);
               }),
-              if (!isOldestAdmin) ...[
+              if (_currentUserRole == 'admin' && !isOldestAdmin) ...[
                 const SizedBox(height: 8),
                 _buildMemberOption('Changer le grade', 'edit.svg', const Color(0xFF00CEC9), () {
                   Navigator.pop(ctx);
                   _showRoleChange(member, surfaceColor, borderColor, textColor, textDimColor);
                 }),
+              ],
+              if (_currentUserRole != 'admin') ...[
+                const SizedBox(height: 8),
+                _buildMemberOption('Grade', 'lock.svg', AppColors.warning, () => Navigator.pop(ctx)),
               ],
               if (!isOldestAdmin && !isLastAdmin) ...[
                 const SizedBox(height: 8),
@@ -1163,6 +1196,14 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
   }
 
   void _showRoleChange(Map<String, dynamic> member, Color surfaceColor, Color borderColor, Color textColor, Color textDimColor) {
+    if (_currentUserRole != 'admin') {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Seul un administrateur peut changer un grade'),
+        backgroundColor: AppColors.warning,
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
     final name = (member['name'] as String?) ?? '';
     final currentRole = (member['role'] as String?) ?? 'member';
     final memberId = (member['id'] as String?) ?? '';
@@ -1207,6 +1248,16 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
     return GestureDetector(
       onTap: () async {
         if (isSelected) return;
+        if (_currentUserRole != 'admin') {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('Seul un administrateur peut changer un grade'),
+              backgroundColor: AppColors.warning,
+              behavior: SnackBarBehavior.floating,
+            ));
+          }
+          return;
+        }
         final orgs = await _backend.getOrganizations();
         if (orgs.isNotEmpty) {
           final orgId = orgs.first['id'] as String;

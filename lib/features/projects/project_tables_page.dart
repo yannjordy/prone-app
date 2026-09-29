@@ -41,6 +41,10 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
   String? _idColumn;
 
   Timer? _autoRefresh;
+  Timer? _resumeTimer;
+  bool _autoRefreshOn = true;
+  DateTime? _resumeAutoAt;
+  final FocusNode _valueFilterFocus = FocusNode();
 
   @override
   void initState() {
@@ -49,10 +53,32 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
     // L'inspecteur doit rester synchrone avec la base et l'app Prone :
     // on resillonne les lignes et la liste des tables en arriere-plan.
     _autoRefresh = Timer.periodic(const Duration(seconds: 4), (_) => _tick());
+    // Toute saisie met le rafraichissement en sommeil : on ne bouge jamais
+    // les donnees sous les doigts de l'utilisateur.
+    _valueFilterFocus.addListener(() => _holdAutoRefresh(const Duration(seconds: 6)));
+  }
+
+  /// Geler l'auto-refresh pendant [delay] (form ouvert, saisie, geste recent).
+  void _holdAutoRefresh([Duration delay = const Duration(seconds: 8)]) {
+    _resumeAutoAt = DateTime.now().add(delay);
+    _resumeTimer?.cancel();
+    _resumeTimer = Timer(delay, () { if (mounted) setState(() {}); });
+  }
+
+  bool get _autoRefreshBlocked {
+    if (!_autoRefreshOn) return true;
+    // Une feuille / boite de dialogue est ouverte au-dessus de la page :
+    // c'est la ou l'utilisateur manipule les lignes.
+    final route = ModalRoute.of(context);
+    if (route != null && !route.isCurrent) return true;
+    if (_valueFilterFocus.hasFocus) return true;
+    final at = _resumeAutoAt;
+    if (at != null && DateTime.now().isBefore(at)) return true;
+    return false;
   }
 
   Future<void> _tick() async {
-    if (!mounted || _loading || _loadingRows) return;
+    if (!mounted || _loading || _loadingRows || _autoRefreshBlocked) return;
     if (_selectedTable == null) {
       await _loadTables();
     } else {
@@ -63,6 +89,8 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
   @override
   void dispose() {
     _autoRefresh?.cancel();
+    _resumeTimer?.cancel();
+    _valueFilterFocus.dispose();
     _tableSearchController.dispose();
     _valueSearchController.dispose();
     super.dispose();
@@ -143,7 +171,9 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
     final table = _selectedTable;
     if (table == null) return;
     final targetPage = page ?? _page;
-    setState(() { _loadingRows = true; _pageError = null; });
+    // On ne remet pas _pageError a null ici : sinon le bandeau d'erreur
+    // clignote a chaque rafraichissement de fond. Il est repris plus bas.
+    setState(() => _loadingRows = true);
     try {
       final value = _valueSearchController.text.trim();
       final res = await BackendAdapter.fetchRows(
@@ -383,6 +413,7 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
               ),
               child: TextField(
                 controller: _valueSearchController,
+                focusNode: _valueFilterFocus,
                 style: TextStyle(fontSize: 13, color: ThemeHelper.text(context)),
                 decoration: InputDecoration(hintText: 'Valeur', border: InputBorder.none, hintStyle: TextStyle(fontSize: 13, color: ThemeHelper.textDim(context))),
                 onSubmitted: (_) => _runFilter(),
@@ -402,7 +433,9 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
         ]),
       ),
       const SizedBox(height: 12),
-      if (_loadingRows) const LinearProgressIndicator(color: AppColors.primary, backgroundColor: Colors.transparent),
+      // Hauteur fixe : la barre n'apparait plus ni ne disparait, la grille
+      // ne bouge donc pas d'un pixel pendant un rafraichissement.
+      const SizedBox(height: 3, child: LinearProgressIndicator(color: AppColors.primary, backgroundColor: Colors.transparent)),
       Expanded(child: _buildDataGrid(cols)),
       const SizedBox(height: 8),
       _buildPagination(),
@@ -459,6 +492,7 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
   }
 
   void _showRowDetail(Map<String, dynamic> row) {
+    _holdAutoRefresh();
     final surfaceColor = ThemeHelper.surface(context);
     final borderColor = ThemeHelper.borderLight(context);
     showModalBottomSheet(
@@ -960,6 +994,26 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
           ),
           const SizedBox(width: 4),
           _PageBtn(enabled: hasNext, onTap: hasNext && !_loadingRows ? () => _loadRows(page: _page + 1) : null, icon: 'chevron-right.svg'),
+          const SizedBox(width: 6),
+          GestureDetector(
+            onTap: () => setState(() {
+              _autoRefreshOn = !_autoRefreshOn;
+              if (_autoRefreshOn) _resumeAutoAt = null;
+            }),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              decoration: BoxDecoration(
+                color: (_autoRefreshOn ? AppColors.success : AppColors.primary).withOpacity(0.12),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: (_autoRefreshOn ? AppColors.success : AppColors.primary).withOpacity(0.35)),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                SvgPicture.asset('assets/icons/refresh.svg', width: 12, height: 12, colorFilter: ColorFilter.mode(_autoRefreshOn ? AppColors.success : AppColors.primary, BlendMode.srcIn)),
+                const SizedBox(width: 4),
+                Text(_autoRefreshOn ? 'Auto' : 'Pause', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: _autoRefreshOn ? AppColors.success : AppColors.primary)),
+              ]),
+            ),
+          ),
         ]),
       ),
     );

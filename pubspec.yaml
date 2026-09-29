@@ -20,6 +20,9 @@ dependencies:
   # Temps reel (Supabase Realtime, protocole Phoenix sur WebSocket)
   web_socket_channel: ^2.4.0
   
+  # Lien prone://join/ -> ouverture directe de l'app
+  app_links: ^6.4.0
+  
   # Local Storage
   shared_preferences: ^2.2.2
   path: ^1.8.3

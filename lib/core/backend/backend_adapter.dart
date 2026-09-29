@@ -41,19 +41,22 @@ class BackendAdapter {
 
   Map<String, String> get headers {
     final h = <String, String>{};
-    if (apiKey.isEmpty) return h;
+    // Une clé collée avec un espace ou un retour à la ligne termine en 401
+    // sur Supabase : on la normalise avant tout envoi.
+    final key = apiKey.trim();
+    if (key.isEmpty) return h;
 
     switch (type) {
       case BackendType.supabase:
-        h['apikey'] = apiKey;
-        h['Authorization'] = 'Bearer $apiKey';
+        h['apikey'] = key;
+        h['Authorization'] = 'Bearer $key';
         h['Content-Type'] = 'application/json';
         break;
       case BackendType.firebase:
-        h['Authorization'] = 'Bearer $apiKey';
+        h['Authorization'] = 'Bearer $key';
         break;
       default:
-        h['Authorization'] = 'Bearer $apiKey';
+        h['Authorization'] = 'Bearer $key';
         h['Content-Type'] = 'application/json';
         break;
     }
@@ -84,7 +87,40 @@ class BackendAdapter {
   /// une reussite : exiger 200 faisait echouer la lecture des donnees.
   static bool _isSuccess(int? status) => status != null && status >= 200 && status < 300;
 
-  static String _statusError(int? status) => 'HTTP ${status ?? 0}';
+  /// Detail lisible renvoye par le backend (PostgREST donne le nom exact
+  /// de la table manquante, Supabase l'erreur de politique RLS, ...).
+  static String _errorDetail(dynamic data) {
+    if (data is Map) {
+      for (final key in ['message', 'error', 'error_description', 'hint', 'details']) {
+        final v = data[key];
+        if (v != null && '$v'.trim().isNotEmpty) return '$v'.trim();
+      }
+    } else if (data is String && data.trim().isNotEmpty) {
+      final s = data.trim();
+      return s.length > 240 ? '${s.substring(0, 240)}…' : s;
+    }
+    return '';
+  }
+
+  static String _statusLabel(int? status) => switch (status) {
+        400 => 'Requete refusee (400)',
+        401 => 'Cle API absente ou refusee (401)',
+        403 => 'Acces refuse - regles RLS ou permissions (403)',
+        404 => 'Table ou ligne introuvable (404)',
+        409 => 'Conflit - ligne deja existante (409)',
+        422 => 'Valeurs invalides rejetees par le backend (422)',
+        429 => 'Trop de requetes (429)',
+        500 => 'Erreur interne du backend (500)',
+        502 => 'Backend injoignable (502)',
+        503 => 'Backend indisponible (503)',
+        _ => 'Erreur HTTP ${status ?? 0}',
+      };
+
+  static String _statusError(int? status, [dynamic data]) {
+    final label = _statusLabel(status);
+    final detail = _errorDetail(data);
+    return detail.isEmpty ? label : '$label — $detail';
+  }
 
   static Future<BackendCheckResult> check(String url, String apiKey, {String? type}) async {
     BackendAdapter? adapter;
@@ -309,7 +345,7 @@ class BackendAdapter {
           table: table,
           offset: offset,
           limit: limit,
-          error: _statusError(resp.statusCode),
+          error: _statusError(resp.statusCode, resp.data),
           offline: resp.statusCode == 0,
         );
       }
@@ -394,7 +430,7 @@ class BackendAdapter {
         );
         _log('GET', target, status: resp.statusCode, ms: DateTime.now().difference(sw).inMilliseconds);
         if (!_isSuccess(resp.statusCode)) {
-          return CountResult(table: table, error: _statusError(resp.statusCode));
+          return CountResult(table: table, error: _statusError(resp.statusCode, resp.data));
         }
         final total = _parseContentRange(resp.headers.value('content-range') ?? resp.headers.value('Content-Range'));
         if (total != null) {
@@ -416,7 +452,7 @@ class BackendAdapter {
         options: Options(headers: adapter.headers, receiveTimeout: const Duration(seconds: 20), validateStatus: (s) => s != null && s < 500),
       );
       if (!_isSuccess(resp.statusCode)) {
-        return CountResult(table: table, error: _statusError(resp.statusCode));
+        return CountResult(table: table, error: _statusError(resp.statusCode, resp.data));
       }
       final data = resp.data;
       final n = data is List ? data.length : (data is Map ? 1 : 0);
@@ -449,7 +485,7 @@ class BackendAdapter {
           options: Options(headers: adapter.headers, receiveTimeout: const Duration(seconds: 15), validateStatus: (st) => st != null && st < 500),
         );
         if (!_isSuccess(resp.statusCode)) {
-          return SchemaResult(table: table, error: _statusError(resp.statusCode));
+          return SchemaResult(table: table, error: _statusError(resp.statusCode, resp.data));
         }
         final spec = resp.data;
         if (spec is Map) {
@@ -490,7 +526,7 @@ class BackendAdapter {
       if (_isSuccess(resp.statusCode)) {
         return SchemaResult(table: table, columns: const [], inferred: true);
       }
-      return SchemaResult(table: table, error: _statusError(resp.statusCode));
+      return SchemaResult(table: table, error: _statusError(resp.statusCode, resp.data));
     } on DioException catch (e) {
       return SchemaResult(table: table, error: _humanError(e), offline: isOfflineError(e));
     }
@@ -568,24 +604,8 @@ class BackendAdapter {
   }
 
   static String _writeError(int status, dynamic data) {
-    String detail = '';
-    if (data is Map) {
-      for (final key in ['message', 'error', 'error_description', 'hint', 'details']) {
-        final v = data[key];
-        if (v != null && '$v'.trim().isNotEmpty) { detail = '$v'.trim(); break; }
-      }
-    } else if (data is String && data.trim().isNotEmpty) {
-      final s = data.trim();
-      detail = s.length > 240 ? '${s.substring(0, 240)}…' : s;
-    }
-    final label = switch (status) {
-      401 => 'Clé API refusée (401)',
-      403 => 'Accès refusé — règles RLS ou permissions (403)',
-      404 => 'Table ou ligne introuvable (404)',
-      409 => 'Conflit — ligne déjà existante (409)',
-      422 => 'Valeurs invalides rejetées par le backend (422)',
-      _ => 'Erreur HTTP $status',
-    };
+    final detail = _errorDetail(data);
+    final label = _statusLabel(status);
     return detail.isEmpty ? label : '$label\n$detail';
   }
 
