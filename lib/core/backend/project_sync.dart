@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import '../local/database_helper.dart';
 import 'backend_adapter.dart';
+import 'realtime_sync.dart';
 
 /// Resultat d'un cycle de synchronisation.
 class SyncStats {
@@ -49,6 +50,7 @@ class ProjectSync {
 
   Timer? _timer;
   bool _busy = false;
+  bool _pending = false;
   SyncStats? lastStats;
   void Function(SyncStats stats)? onSynced;
 
@@ -196,16 +198,24 @@ create policy prone_sync_projects on public.$projectsTable for all using (true) 
       stats.error = 'Aucun backend connecte pour ce projet.';
       return stats;
     }
-    if (_busy) return stats;
+    if (_busy) {
+      // Un evennement realtime est arrive pendant un cycle : on le rejoue
+      // juste apres, sinon la ligne serait perdue jusqu'au prochain polling.
+      _pending = true;
+      return lastStats ?? stats;
+    }
     _busy = true;
     try {
       await _push(projectId, url, apiKey, type, stats);
-      if (stats.error != null) return stats;
-      await _pull(projectId, url, apiKey, type, stats);
+      if (stats.error == null) await _pull(projectId, url, apiKey, type, stats);
       lastStats = stats;
       return stats;
     } finally {
       _busy = false;
+      if (_pending) {
+        _pending = false;
+        unawaited(syncNow(projectId: projectId, url: url, apiKey: apiKey, type: type));
+      }
     }
   }
 
@@ -448,6 +458,19 @@ create policy prone_sync_projects on public.$projectsTable for all using (true) 
     if (_timer != null && _pollingFor == projectId) return;
     stopPolling();
     _pollingFor = projectId;
+
+    // Supabase : socket temps reel en plus du polling de securite.
+    if (BackendAdapter.detect(url, type) == BackendType.supabase) {
+      SupabaseRealtime.instance.attach(
+        url: url,
+        apiKey: apiKey,
+        projectId: projectId,
+        onChange: () async {
+          final s = await syncNow(projectId: projectId, url: url, apiKey: apiKey, type: type);
+          if (s.pushedRows > 0 || s.pulledRows > 0 || s.error != null) onSynced?.call(s);
+        },
+      );
+    }
     _timer = Timer.periodic(interval, (_) async {
       final stats = await syncNow(projectId: projectId, url: url, apiKey: apiKey, type: type);
       final cb = onSynced;
@@ -460,9 +483,11 @@ create policy prone_sync_projects on public.$projectsTable for all using (true) 
   String? _pollingFor;
 
   void stopPolling() {
+    SupabaseRealtime.instance.detach();
     _timer?.cancel();
     _timer = null;
     _pollingFor = null;
+    _pending = false;
   }
 
   /// Reinitialisation complete, utilisee par les tests.
@@ -470,5 +495,6 @@ create policy prone_sync_projects on public.$projectsTable for all using (true) 
     stopPolling();
     lastStats = null;
     _busy = false;
+    _pending = false;
   }
 }

@@ -63,11 +63,11 @@ class LocalBackend {
     return await _db.query('projects', where: 'organization_id = ?', whereArgs: [orgId], orderBy: 'updated_at DESC');
   }
 
-  Future<Map<String, dynamic>> createProject(String name, String description, {String? apiKey, String? backendUrl, String? photo, String? organizationId}) async {
-    final id = _uuid.v4();
+  Future<Map<String, dynamic>> createProject(String name, String description, {String? apiKey, String? backendUrl, String? photo, String? organizationId, String? id}) async {
+    final pid = (id != null && id.isNotEmpty) ? id : _uuid.v4();
     final now = DateTime.now().toIso8601String();
     final project = {
-      'id': id, 'organization_id': organizationId ?? '', 'name': name, 'description': description,
+      'id': pid, 'organization_id': organizationId ?? '', 'name': name, 'description': description,
       'api_key': apiKey ?? '', 'backend_url': backendUrl ?? '',
       'photo': photo ?? '',
       'join_code': _generateJoinCode(),
@@ -125,6 +125,33 @@ class LocalBackend {
     updates['updated_at'] = DateTime.now().toIso8601String();
     updates['sync_state'] = 'dirty';
     await _db.update('projects', updates, where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// Change l'identifiant d'un projet et repointe ses membres/messages :
+  /// utilise quand une invitation impose l'ID partage par l'inviteur.
+  Future<void> retargetProject(String oldId, String newId) async {
+    if (oldId.isEmpty || newId.isEmpty || oldId == newId) return;
+    final now = DateTime.now().toIso8601String();
+    final members = await _db.query('members', where: 'project_id = ?', whereArgs: [oldId]);
+    for (final m in members) {
+      await _db.update('members', {'project_id': newId, 'updated_at': now, 'sync_state': 'dirty'},
+          where: 'id = ?', whereArgs: [m['id']]);
+    }
+    final msgs = await _db.query('messages', where: 'project_id = ?', whereArgs: [oldId]);
+    for (final m in msgs) {
+      await _db.update('messages', {'project_id': newId, 'updated_at': now, 'sync_state': 'dirty'},
+          where: 'id = ?', whereArgs: [m['id']]);
+    }
+    await _db.update('projects', {'id': newId, 'updated_at': now, 'sync_state': 'dirty'},
+        where: 'id = ?', whereArgs: [oldId]);
+  }
+
+  /// Marque un projet comme etant la copie locale d'une entite distante :
+  /// la prochaine lecture remontera le nom/photo/description de l'inviteur
+  /// plutot que d'ecraser la source avec des champs vides.
+  Future<void> preferRemoteProject(String id) async {
+    await _db.update('projects', {'sync_state': 'synced', 'updated_at': '1970-01-01T00:00:00.000Z'},
+        where: 'id = ?', whereArgs: [id]);
   }
 
   Future<void> deleteProject(String id) async {

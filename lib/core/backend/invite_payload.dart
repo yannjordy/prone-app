@@ -53,19 +53,26 @@ class InvitePayload {
     }
   }
 
+  /// Taille maximale d'un QR Code (niveau de correction M) en octets UTF-8.
+  static const int maxQrBytes = 2900;
+
+  /// Photo et description sont VOLONTAIREMENT absentes : une photo en base64
+  /// fait des dizaines de Ko et depasse la capacite du QR (d'ou le code
+  /// illisible). Elles arrivent par la synchro _prone_projects.
   Map<String, dynamic> toJson() => <String, dynamic>{
         'v': version,
         'id': projectId,
         'n': name,
-        'd': description,
-        'p': photo,
+        'd': description.length > 120 ? description.substring(0, 120) : description,
         'u': backendUrl,
         'k': apiKey,
         'o': orgId,
         'b': inviter,
         'c': joinCode,
-        't': createdAt,
       };
+
+  /// true si le lien tient dans un QR Code.
+  bool get fitsQr => utf8.encode(link).length <= maxQrBytes;
 
   String encode() {
     final json = jsonEncode(toJson());

@@ -647,10 +647,11 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                           setState(() => _showSettings = false);
                           _showMembersSheet();
                         }),
-                        _SettingsItem(icon: 'terminal.svg', label: 'API Key', onTap: () {
-                          setState(() => _showSettings = false);
-                          _showApiKeySheet();
-                        }),
+                        if (_isAdmin)
+                          _SettingsItem(icon: 'terminal.svg', label: 'API Key', onTap: () {
+                            setState(() => _showSettings = false);
+                            _showApiKeySheet();
+                          }),
                         _SettingsItem(icon: 'connections.svg', label: 'Backend', onTap: () {
                           setState(() => _showSettings = false);
                           context.go('/projects/${widget.projectId}/connections');
@@ -1506,18 +1507,33 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
               children: [
                 Text('Scannez pour intégrer ce projet', style: TextStyle(fontSize: 13, color: ThemeHelper.textDim(context))),
                 const SizedBox(height: 20),
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 16)]),
-                  child: QrImageView(
-                    data: payload.link,
-                    version: QrVersions.auto,
-                    size: 200,
-                    backgroundColor: Colors.white,
-                    eyeStyle: const QrEyeStyle(color: Color(0xFF181818)),
-                    dataModuleStyle: const QrDataModuleStyle(color: Color(0xFF181818)),
+                if (!payload.fitsQr)
+                  Container(
+                    width: 200, height: 200,
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), border: Border.all(color: AppColors.error)),
+                    child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                      const Icon(Icons.error_outline, color: AppColors.error, size: 34),
+                      const SizedBox(height: 10),
+                      Text('L\'invitation est trop lourde pour un QR Code\n(${utf8.encode(payload.link).length} o / ${InvitePayload.maxQrBytes} o max)',
+                          textAlign: TextAlign.center, style: const TextStyle(fontSize: 11, color: AppColors.error)),
+                      const SizedBox(height: 8),
+                      Text('Utilisez l\'onglet Lien', style: TextStyle(fontSize: 11, color: Colors.black54)),
+                    ]),
+                  )
+                else
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 16)]),
+                    child: QrImageView(
+                      data: payload.link,
+                      version: QrVersions.auto,
+                      size: 200,
+                      backgroundColor: Colors.white,
+                      eyeStyle: const QrEyeStyle(color: Color(0xFF181818)),
+                      dataModuleStyle: const QrDataModuleStyle(color: Color(0xFF181818)),
+                    ),
                   ),
-                ),
               ],
             );
           } else if (tab == 'link') {
@@ -1711,22 +1727,36 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                     ),
                     const SizedBox(width: 12),
                     Expanded(
-                      child: GestureDetector(
-                        onTap: () {
-                          if (_projectApiKey.isNotEmpty) {
-                            Clipboard.setData(ClipboardData(text: _projectApiKey));
-                          }
-                          Navigator.pop(context);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text(_projectApiKey.isNotEmpty ? 'API Key copiée !' : 'Aucune clé à copier'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-                          );
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)),
-                          child: const Center(child: Text('Copier', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600))),
-                        ),
-                      ),
+                      child: _isAdmin
+                          ? GestureDetector(
+                              onTap: () {
+                                if (_projectApiKey.isNotEmpty) {
+                                  Clipboard.setData(ClipboardData(text: _projectApiKey));
+                                }
+                                Navigator.pop(context);
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text(_projectApiKey.isNotEmpty ? 'API Key copiée !' : 'Aucune clé à copier'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+                                );
+                              },
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(vertical: 14),
+                                decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)),
+                                child: const Center(child: Text('Copier', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600))),
+                              ),
+                            )
+                          : GestureDetector(
+                              onTap: () {
+                                Navigator.pop(context);
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('Copie réservée aux administrateurs'), backgroundColor: AppColors.warning, behavior: SnackBarBehavior.floating),
+                                );
+                              },
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(vertical: 14),
+                                decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.warning.withOpacity(0.4))),
+                                child: const Center(child: Text('Réservé aux admins', style: TextStyle(color: AppColors.warning, fontSize: 14, fontWeight: FontWeight.w600))),
+                              ),
+                            ),
                     ),
                   ],
                 ),
@@ -2107,7 +2137,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                           Text('Copier', style: TextStyle(fontSize: 12, color: AppColors.primary, fontWeight: FontWeight.w500)),
                         ]),
                       ),
-                      if (_isAdmin) ...[
+                      if (_isAdmin || msg.fromMe) ...[
                         const SizedBox(width: 14),
                         GestureDetector(
                           onTap: () async {

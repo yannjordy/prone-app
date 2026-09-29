@@ -25,6 +25,7 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
   bool _canOpenSettings = false;
   bool _isProcessing = false;
   bool _isStarting = false;
+  bool _autoRetried = false;
   late AnimationController _lineController;
 
   @override
@@ -57,15 +58,8 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
         return;
       }
 
-      _cameraController?.removeListener(_onControllerChanged);
-      await _cameraController?.dispose();
-      _cameraController = MobileScannerController(
-        detectionSpeed: DetectionSpeed.normal,
-        facing: CameraFacing.back,
-        torchEnabled: false,
-        formats: [BarcodeFormat.qrCode],
-      );
-      _cameraController!.addListener(_onControllerChanged);
+      await _teardownController();
+      _cameraController = _newController();
 
       if (!mounted) return;
       setState(() { _isStarting = false; _hasError = false; _errorMsg = ''; });
@@ -92,12 +86,66 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
     }
   }
 
+  MobileScannerController _newController() {
+    final c = MobileScannerController(
+      detectionSpeed: DetectionSpeed.normal,
+      facing: CameraFacing.back,
+      torchEnabled: false,
+      formats: [BarcodeFormat.qrCode],
+    );
+    c.addListener(_onControllerChanged);
+    return c;
+  }
+
+  /// Detache le widget AVANT de liberer le controleur : relacher la camera
+  /// pendant que MobileScanner l'utilise provoque exactement le NPE
+  /// "Attempt to invoke virtual method ... on a null object reference".
+  Future<void> _teardownController() async {
+    final old = _cameraController;
+    if (old == null) return;
+    _cameraController = null;
+    if (mounted) setState(() {});
+    await Future.delayed(const Duration(milliseconds: 150));
+    try {
+      old.removeListener(_onControllerChanged);
+    } catch (_) {}
+    try {
+      await old.dispose();
+    } catch (_) {}
+  }
+
+  Future<void> _restartCamera() async {
+    if (_isStarting) return;
+    _isStarting = true;
+    await _teardownController();
+    if (!mounted) {
+      _isStarting = false;
+      return;
+    }
+    _cameraController = _newController();
+    setState(() {
+      _isStarting = false;
+      _cameraReady = false;
+      _hasError = false;
+      _errorMsg = '';
+    });
+  }
+
   void _onControllerChanged() {
     if (!mounted || _isProcessing) return;
     final controller = _cameraController;
     if (controller == null) return;
     final error = controller.value.error;
     if (error != null) {
+      // Un NPE interne au plugin n'est pas définitif : une relance propre
+      // de la camera suffit dans la très grande majorité des cas.
+      if (!_autoRetried && error.errorCode == MobileScannerErrorCode.genericError) {
+        _autoRetried = true;
+        Future.delayed(const Duration(milliseconds: 300), () {
+          if (mounted) _restartCamera();
+        });
+        return;
+      }
       setState(() {
         _hasError = true;
         _cameraReady = false;
@@ -120,8 +168,11 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
       case MobileScannerErrorCode.controllerUninitialized:
         return 'Le scanner a ete interrompu.\nTouchez Reessayer.';
       case MobileScannerErrorCode.genericError:
-        final details = e.errorDetails?.message;
-        return details == null || details.isEmpty ? 'Camera indisponible.' : 'Camera: $details';
+        final details = (e.errorDetails?.message ?? '').trim();
+        if (details.isEmpty || details.contains('Attempt to invoke') || details.contains('null object')) {
+          return 'La camera n\'a pas pu demarrer (conflit temporaire).\nTouchez Reessayer, ou collez le code.';
+        }
+        return 'Camera: $details';
     }
   }
 
@@ -129,6 +180,9 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
     final msg = e.toString();
     if (msg.contains('Permission') || msg.contains('permission')) {
       return 'Permission camera refusee.\nAutorisez l\'acces dans les parametres.';
+    }
+    if (msg.contains('Attempt to invoke') || msg.contains('null object')) {
+      return 'La camera n\'a pas pu demarrer (conflit temporaire).\nTouchez Reessayer, ou collez le code.';
     }
     if (msg.contains('camera') || msg.contains('Camera')) {
       return 'Camera non disponible.';
@@ -214,8 +268,16 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
 
   @override
   void dispose() {
-    _cameraController?.removeListener(_onControllerChanged);
-    _cameraController?.dispose();
+    final old = _cameraController;
+    _cameraController = null;
+    if (old != null) {
+      try {
+        old.removeListener(_onControllerChanged);
+      } catch (_) {}
+      try {
+        old.dispose();
+      } catch (_) {}
+    }
     _lineController.dispose();
     super.dispose();
   }
@@ -385,6 +447,7 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
             ),
           GestureDetector(
             onTap: () {
+              _autoRetried = false;
               setState(() { _hasError = false; _cameraReady = false; _errorMsg = ''; });
               _initCamera();
             },

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:typed_data';
 import 'dart:convert';
 import 'dart:ui';
@@ -177,11 +178,18 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
       final dateB = (b['created_at'] as String?) ?? '';
       return dateA.compareTo(dateB);
     });
-    final oldestAdmin = members.isNotEmpty ? members.first : <String, dynamic>{};
-    final oldestAdminId = (oldestAdmin['id'] as String?) ?? '';
+    String myId = '';
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      myId = prefs.getString('member_id_${widget.projectId}') ?? '';
+    } catch (_) {}
+    final me = myId.isNotEmpty
+        ? members.firstWhere((m) => (m['id'] as String?) == myId, orElse: () => <String, dynamic>{})
+        : <String, dynamic>{};
+    final fallback = members.isNotEmpty ? members.first : <String, dynamic>{};
     if (mounted) setState(() {
       _members = members;
-      _currentUserRole = (oldestAdmin['role'] as String?) ?? 'admin';
+      _currentUserRole = (me['role'] as String?) ?? (fallback['role'] as String?) ?? 'viewer';
       _isOldestAdmin = _currentUserRole == 'admin';
       _membersLoading = false;
     });

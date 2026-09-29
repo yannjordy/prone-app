@@ -1251,37 +1251,63 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
     final mePhoto = profile['photo']!;
 
     final existing = await _backend.getProjects();
-    final duplicates = existing
-        .where((p) =>
-            ((p['name'] as String?) ?? '').trim() == name &&
-            ((p['backend_url'] as String?) ?? '').trim() == backendUrl.trim())
-        .toList();
 
+    // L'ID du projet doit etre IDENTIQUE sur tous les appareils : c'est la
+    // cle de jointure de la synchro (_prone_messages.project_id, etc.).
+    // Sans ça chaque invitation creerait un projet local different et le
+    // membre rejoignant ne serait jamais visible par l'inviteur.
+    final invitedId = payload?.projectId.trim() ?? '';
     String projectId;
-    if (duplicates.isNotEmpty) {
-      projectId = duplicates.first['id'] as String;
+    if (invitedId.isNotEmpty && existing.any((p) => (p['id'] as String?) == invitedId)) {
+      projectId = invitedId;
     } else {
-      final project = await _backend.createProject(
-        name,
-        desc,
-        apiKey: apiKey,
-        backendUrl: backendUrl,
-        photo: photo,
-        organizationId: orgId,
-      );
-      projectId = project['id'] as String;
+      final duplicates = existing
+          .where((p) =>
+              ((p['name'] as String?) ?? '').trim() == name &&
+              ((p['backend_url'] as String?) ?? '').trim() == backendUrl.trim())
+          .toList();
+      if (duplicates.isEmpty) {
+        final project = await _backend.createProject(
+          name,
+          desc,
+          apiKey: apiKey,
+          backendUrl: backendUrl,
+          photo: photo,
+          organizationId: orgId,
+          id: invitedId.isNotEmpty ? invitedId : null,
+        );
+        projectId = project['id'] as String;
+      } else if (invitedId.isNotEmpty) {
+        // Un projet homonyme local existe deja : on le rebaptise sur l'ID
+        // invite pour que les deux appareils pointent sur la meme entite.
+        await _backend.retargetProject(duplicates.first['id'] as String, invitedId);
+        projectId = invitedId;
+      } else {
+        projectId = duplicates.first['id'] as String;
+      }
     }
     await prefs.setBool('has_backend', backendUrl.trim().isNotEmpty);
+    if (payload != null && invitedId.isNotEmpty) {
+      // La photo/description arrivent par la synchro : on laisse la source
+      // distante gagner au premier cycle.
+      await _backend.preferRemoteProject(projectId);
+    }
 
     final members = await _backend.getMembersByProject(projectId);
     if (inviter.isNotEmpty && !members.any((m) => ((m['name'] as String?) ?? '') == inviter)) {
       await _backend.addMember(orgId, inviter, '', 'admin', projectId: projectId);
     }
 
-    final mine = members.firstWhere(
-      (m) => ((m['name'] as String?) ?? '') == meName,
-      orElse: () => <String, dynamic>{},
-    );
+    String? knownId = prefs.getString('member_id_$projectId') ?? '';
+    if (knownId.isNotEmpty && !members.any((m) => (m['id'] as String?) == knownId)) {
+      knownId = '';
+    }
+    final mine = knownId.isNotEmpty
+        ? members.firstWhere((m) => (m['id'] as String?) == knownId, orElse: () => <String, dynamic>{})
+        : members.firstWhere(
+            (m) => ((m['name'] as String?) ?? '') == meName,
+            orElse: () => <String, dynamic>{},
+          );
     if (mine.isNotEmpty) {
       await prefs.setString('member_id_$projectId', (mine['id'] as String?) ?? '');
       await _backend.updateMember((mine['id'] as String?) ?? '', {
