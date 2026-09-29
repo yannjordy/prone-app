@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import '../../app/app.dart';
+import '../../core/backend/invite_payload.dart';
 
 Widget createQrScanner({required Function(String link) onScanned}) {
   return _MobileQrScanner(onScanned: onScanned);
@@ -85,7 +86,9 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
     final barcode = capture.barcodes.firstOrNull;
     if (barcode?.rawValue == null) return;
     final raw = barcode!.rawValue!;
-    if (!raw.contains('prone://invite/')) return;
+    final payload = InvitePayload.tryParse(raw);
+    final legacy = payload == null ? InvitePayload.legacyProjectId(raw) : null;
+    if (payload == null && legacy == null) return;
     _isProcessing = true;
     _cameraController?.stop();
     HapticFeedback.heavyImpact();

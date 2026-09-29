@@ -10,6 +10,7 @@ import '../../app/app.dart';
 import '../../core/utils/photo_picker_helper.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../../core/local/local_backend.dart';
+import '../../core/backend/invite_payload.dart';
 
 class ProjectSettingsPage extends StatefulWidget {
   final String projectId;
@@ -640,8 +641,38 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
     );
   }
 
+  Future<InvitePayload> _buildInvitePayload() async {
+    final projects = await _backend.getProjects();
+    final p = projects.firstWhere((x) => x['id'] == widget.projectId, orElse: () => <String, dynamic>{});
+    final orgs = await _backend.getOrganizations();
+    final joinCode = await _backend.getOrCreateJoinCode(widget.projectId);
+    String inviter = '';
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final memberId = prefs.getString('member_id_${widget.projectId}') ?? '';
+      final members = await _backend.getMembersByProject(widget.projectId);
+      for (final m in members) {
+        if (memberId.isNotEmpty && (m['id'] as String?) == memberId) {
+          inviter = (m['name'] as String?) ?? '';
+          break;
+        }
+      }
+      if (inviter.isEmpty && members.isNotEmpty) inviter = (members.first['name'] as String?) ?? '';
+    } catch (_) {}
+    if (p.isEmpty) {
+      return InvitePayload(projectId: widget.projectId, name: _projectName, description: _projectDesc, backendUrl: _backendUrl, apiKey: _apiKey, inviter: inviter, joinCode: joinCode);
+    }
+    return InvitePayload.fromProject(
+      p,
+      inviter: inviter,
+      orgId: orgs.isNotEmpty ? ((orgs.first['id'] as String?) ?? '') : '',
+      joinCode: joinCode,
+    );
+  }
+
   void _showCodeInvite(Color surfaceColor, Color borderColor, Color textColor, Color textDimColor) async {
-    final code = await _backend.getOrCreateJoinCode(widget.projectId);
+    final payload = await _buildInvitePayload();
+    final code = payload.code;
     showModalBottomSheet(
       context: context, backgroundColor: Colors.transparent, useRootNavigator: true, isScrollControlled: true,
       builder: (ctx) => ClipRRect(
@@ -666,9 +697,10 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
                 const SizedBox(height: 24),
                 Container(
                   width: double.infinity,
-                  padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
+                  constraints: const BoxConstraints(maxHeight: 160),
+                  padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
                   decoration: BoxDecoration(color: ThemeHelper.bg(ctx), borderRadius: BorderRadius.circular(16), border: Border.all(color: borderColor)),
-                  child: Text(code, textAlign: TextAlign.center, style: TextStyle(fontSize: 36, fontWeight: FontWeight.w700, color: AppColors.primary, letterSpacing: 8, fontFamily: 'monospace')),
+                  child: SingleChildScrollView(child: SelectableText(code, textAlign: TextAlign.center, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.primary, fontFamily: 'monospace'))),
                 ),
                 const SizedBox(height: 16),
                 Row(
@@ -682,11 +714,14 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
                     )),
                     const SizedBox(width: 12),
                     Expanded(child: GestureDetector(
-                      onTap: () {
+                      onTap: () async {
+                        final payload = await _buildInvitePayload();
+                        if (!mounted) return;
                         Navigator.pop(ctx);
-                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Code partage'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                        Clipboard.setData(ClipboardData(text: payload.link));
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Lien d\'invitation copie'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
                       },
-                      child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Partager', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))),
+                      child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Copier le lien', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))),
                     )),
                   ],
                 ),
@@ -701,8 +736,8 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
     );
   }
 
-  void _showQRInvite(Color surfaceColor, Color borderColor, Color textColor, Color textDimColor) {
-    final inviteLink = 'prone://invite/${widget.projectId}';
+  void _showQRInvite(Color surfaceColor, Color borderColor, Color textColor, Color textDimColor) async {
+    final inviteLink = (await _buildInvitePayload()).link;
     showModalBottomSheet(
       context: context, backgroundColor: Colors.transparent, useRootNavigator: true, isScrollControlled: true,
       builder: (ctx) => ClipRRect(

@@ -13,6 +13,7 @@ import '../../app/app.dart';
 import '../../core/commands/command_library.dart';
 import '../../core/security/bot_protector.dart';
 import '../../core/backend/backend_adapter.dart';
+import '../../core/backend/invite_payload.dart';
 import '../../core/local/local_backend.dart';
 import '../../core/utils/photo_picker_helper.dart';
 import '../../core/offline/offline_queue.dart';
@@ -256,22 +257,35 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         final initials = name.split(' ').where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join().toUpperCase();
         memberList.add(_Member(name: name.isEmpty ? email : name, initials: initials.isEmpty ? '?' : initials, color: colorVal, isOnline: true, photo: photoBytes, role: role, email: email));
       }
-      // Current user is the first member (oldest = admin)
-      if (members.isNotEmpty) {
-        final firstMember = members.first;
+      // Identite locale : le membre cree sur cet appareil (creation ou join)
+      String myMemberId = '';
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        myMemberId = prefs.getString('member_id_${widget.projectId}') ?? '';
+      } catch (_) {}
+      Map<String, dynamic>? me;
+      for (final m in members) {
+        if (myMemberId.isNotEmpty && (m['id'] as String?) == myMemberId) {
+          me = m;
+          break;
+        }
+      }
+      me ??= members.isNotEmpty ? members.first : null;
+      if (me != null) {
+        final myName = (me['name'] as String?) ?? 'Vous';
         _currentUser = _Member(
-          name: (firstMember['name'] as String?) ?? 'Vous',
-          initials: ((firstMember['name'] as String?) ?? 'V').split(' ').where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join().toUpperCase(),
+          name: myName,
+          initials: myName.split(' ').where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join().toUpperCase(),
           color: AppColors.primary,
           isOnline: true,
-          role: (firstMember['role'] as String?) ?? 'admin',
-          email: (firstMember['email'] as String?) ?? '',
+          role: (me['role'] as String?) ?? 'admin',
+          email: (me['email'] as String?) ?? '',
         );
       }
       setState(() {
         _members.clear();
         _members.addAll(memberList);
-        _userRole = (members.isNotEmpty ? (members.first['role'] as String?) : null) ?? 'admin';
+        _userRole = (me != null ? (me['role'] as String?) : null) ?? 'admin';
         _isAdmin = _userRole == 'admin';
       });
     }
@@ -928,7 +942,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                             child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
                               Icon(Icons.qr_code, color: AppColors.success, size: 18),
                               const SizedBox(width: 8),
-                              Text('QR Code', style: TextStyle(fontSize: 13, color: AppColors.success, fontWeight: FontWeight.w600)),
+                              Text('Inviter', style: TextStyle(fontSize: 13, color: AppColors.success, fontWeight: FontWeight.w600)),
                             ]),
                           ),
                         ),
@@ -1239,45 +1253,70 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     );
   }
 
-  void _showQRCode() {
-    final inviteLink = 'prone://invite/${widget.projectId}';
+  void _showQRCode() => _showInviteSheet();
+
+  Future<void> _showInviteSheet() async {
+    final projects = await _backend.getProjects();
+    final match = projects.where((p) => p['id'] == widget.projectId).toList();
+    if (match.isEmpty) return;
+    final project = match.first;
+    final orgs = await _backend.getOrganizations();
+    final joinCode = await _backend.getOrCreateJoinCode(widget.projectId);
+    final inviter = (_currentUser?.name != null && _currentUser!.name.isNotEmpty && _currentUser!.name != 'Vous')
+        ? _currentUser!.name
+        : 'Un membre de $_projectName';
+    final payload = InvitePayload.fromProject(
+      project,
+      inviter: inviter,
+      orgId: orgs.isNotEmpty ? ((orgs.first['id'] as String?) ?? '') : '',
+      joinCode: joinCode,
+    );
+    if (!mounted) return;
+
+    String tab = 'qr';
 
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
-      builder: (context) => ClipRRect(
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-          child: Container(
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: ThemeHelper.surface(context).withOpacity(0.95),
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-            ),
-            child: Column(
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheetState) {
+          void switchTab(String value) => setSheetState(() => tab = value);
+
+          Widget tabChip(String value, String label, IconData icon) {
+            final selected = tab == value;
+            return Expanded(
+              child: GestureDetector(
+                onTap: () => switchTab(value),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  decoration: BoxDecoration(
+                    color: selected ? AppColors.primary.withOpacity(0.15) : Colors.transparent,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: selected ? AppColors.primary.withOpacity(0.4) : Colors.transparent),
+                  ),
+                  child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    Icon(icon, size: 15, color: selected ? AppColors.primary : ThemeHelper.textDim(context)),
+                    const SizedBox(width: 6),
+                    Text(label, style: TextStyle(fontSize: 13, fontWeight: selected ? FontWeight.w600 : FontWeight.w400, color: selected ? AppColors.primary : ThemeHelper.textDim(context))),
+                  ]),
+                ),
+              ),
+            );
+          }
+
+          Widget body;
+          if (tab == 'qr') {
+            body = Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Container(width: 40, height: 4, decoration: BoxDecoration(color: ThemeHelper.borderLight(context), borderRadius: BorderRadius.circular(2))),
-                const SizedBox(height: 20),
-                Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                  SvgPicture.asset('assets/icons/qr_code.svg', width: 20, height: 20, colorFilter: ColorFilter.mode(AppColors.primary, BlendMode.srcIn)),
-                  const SizedBox(width: 8),
-                  Text('QR Code Partage', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: ThemeHelper.text(context))),
-                ]),
-                const SizedBox(height: 8),
                 Text('Scannez pour intégrer ce projet', style: TextStyle(fontSize: 13, color: ThemeHelper.textDim(context))),
-                const SizedBox(height: 24),
+                const SizedBox(height: 20),
                 Container(
                   padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(16),
-                    boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 16)],
-                  ),
+                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 16)]),
                   child: QrImageView(
-                    data: inviteLink,
+                    data: payload.link,
                     version: QrVersions.auto,
                     size: 200,
                     backgroundColor: Colors.white,
@@ -1285,62 +1324,139 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                     dataModuleStyle: const QrDataModuleStyle(color: Color(0xFF181818)),
                   ),
                 ),
+              ],
+            );
+          } else if (tab == 'link') {
+            body = Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Envoyez ce lien par message, mail ou n\'importe où', style: TextStyle(fontSize: 13, color: ThemeHelper.textDim(context))),
                 const SizedBox(height: 16),
                 Container(
                   width: double.infinity,
+                  constraints: const BoxConstraints(maxHeight: 120),
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(12), border: Border.all(color: ThemeHelper.borderLight(context))),
-                  child: Column(
-                    children: [
-                      Text('Lien d\'invitation', style: TextStyle(fontSize: 11, color: ThemeHelper.textDim(context))),
-                      const SizedBox(height: 4),
-                      Text(inviteLink, style: const TextStyle(fontSize: 12, color: AppColors.primary, fontFamily: 'monospace'), textAlign: TextAlign.center),
-                    ],
+                  child: SingleChildScrollView(
+                    child: SelectableText(payload.link, style: const TextStyle(fontSize: 11, color: AppColors.primary, fontFamily: 'monospace')),
                   ),
                 ),
                 const SizedBox(height: 16),
-                Row(
+                Row(children: [
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () {
+                        Clipboard.setData(ClipboardData(text: payload.link));
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Lien copié !'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)),
+                        child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.copy, color: Colors.white, size: 16), SizedBox(width: 8), Text('Copier le lien', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600))]),
+                      ),
+                    ),
+                  ),
+                ]),
+              ],
+            );
+          } else {
+            body = Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Collez ce code dans « Rejoindre » sur l\'autre appareil', style: TextStyle(fontSize: 13, color: ThemeHelper.textDim(context))),
+                const SizedBox(height: 16),
+                Container(
+                  width: double.infinity,
+                  constraints: const BoxConstraints(maxHeight: 140),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(12), border: Border.all(color: ThemeHelper.borderLight(context))),
+                  child: SingleChildScrollView(child: SelectableText(payload.code, style: const TextStyle(fontSize: 12, color: AppColors.primary, fontFamily: 'monospace'))),
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: GestureDetector(
+                    onTap: () {
+                      Clipboard.setData(ClipboardData(text: payload.code));
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Code copié !'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)),
+                      child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.copy, color: Colors.white, size: 16), SizedBox(width: 8), Text('Copier le code', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600))]),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          }
+
+          return ClipRRect(
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+              child: Container(
+                padding: EdgeInsets.fromLTRB(24, 24, 24, MediaQuery.of(context).viewInsets.bottom + 24),
+                decoration: BoxDecoration(
+                  color: ThemeHelper.surface(context).withOpacity(0.95),
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () {
-                          Clipboard.setData(ClipboardData(text: inviteLink));
-                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Lien copié !'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(12), border: Border.all(color: ThemeHelper.borderLight(context))),
-                          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.copy, color: ThemeHelper.textDim(context), size: 16), const SizedBox(width: 8), Text('Copier', style: TextStyle(color: ThemeHelper.textDim(context), fontSize: 14))]),
+                    Container(width: 40, height: 4, decoration: BoxDecoration(color: ThemeHelper.borderLight(context), borderRadius: BorderRadius.circular(2))),
+                    const SizedBox(height: 20),
+                    Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                      SvgPicture.asset('assets/icons/qr_code.svg', width: 20, height: 20, colorFilter: const ColorFilter.mode(AppColors.primary, BlendMode.srcIn)),
+                      const SizedBox(width: 8),
+                      Text('Inviter dans le projet', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: ThemeHelper.text(context))),
+                    ]),
+                    const SizedBox(height: 4),
+                    Text(payload.name, style: TextStyle(fontSize: 13, color: ThemeHelper.textDim(context))),
+                    const SizedBox(height: 16),
+                    Row(children: [
+                      tabChip('qr', 'QR Code', Icons.qr_code),
+                      const SizedBox(width: 8),
+                      tabChip('link', 'Lien', Icons.link),
+                      const SizedBox(width: 8),
+                      tabChip('code', 'Code', Icons.tag),
+                    ]),
+                    const SizedBox(height: 20),
+                    body,
+                    const SizedBox(height: 16),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(color: AppColors.warning.withOpacity(0.1), borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.warning.withOpacity(0.3))),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Row(children: [
+                          const Icon(Icons.warning_amber_rounded, color: AppColors.warning, size: 16),
+                          const SizedBox(width: 6),
+                          Text('Contient votre clé API', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.warning)),
+                        ]),
+                        const SizedBox(height: 4),
+                        Text(
+                          payload.hasBackend
+                              ? '${payload.host} — ne partagez qu\'avec des personnes de confiance.'
+                              : 'Aucun backend connecté : la personne rejoindra un projet vide.',
+                          style: TextStyle(fontSize: 11.5, color: ThemeHelper.textDim(context)),
                         ),
-                      ),
+                      ]),
                     ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () {
-                          Clipboard.setData(ClipboardData(text: inviteLink));
-                          Navigator.pop(context);
-                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Lien d\'invitation copié ! Partagez-le.'), backgroundColor: AppColors.primary, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)),
-                          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.share, color: Colors.white, size: 16), const SizedBox(width: 8), Text('Partager', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600))]),
-                        ),
-                      ),
+                    const SizedBox(height: 12),
+                    GestureDetector(
+                      onTap: () => Navigator.pop(context),
+                      child: Container(width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(12)), child: Center(child: Text('Fermer', style: TextStyle(color: ThemeHelper.textDim(context), fontSize: 14)))),
                     ),
+                    SizedBox(height: MediaQuery.of(context).padding.bottom + 16),
                   ],
                 ),
-                const SizedBox(height: 12),
-                GestureDetector(
-                  onTap: () => Navigator.pop(context),
-                  child: Container(width: double.infinity, padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(12)), child: Center(child: Text('Fermer', style: TextStyle(color: ThemeHelper.textDim(context), fontSize: 14)))),
-                ),
-                SizedBox(height: MediaQuery.of(context).padding.bottom + 16),
-              ],
+              ),
             ),
-          ),
-        ),
+          );
+        },
       ),
     );
   }

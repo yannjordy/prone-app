@@ -10,6 +10,7 @@ import 'dart:math';
 import '../../app/app.dart';
 import '../../core/local/local_backend.dart';
 import '../../core/backend/backend_adapter.dart';
+import '../../core/backend/invite_payload.dart';
 import 'qr_scanner_page.dart';
 
 class ProjectListScreen extends StatefulWidget {
@@ -283,7 +284,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
                         }
                       }),
                       _MenuItem(icon: 'qr_code.svg', label: 'Scanner QR Code', onTap: () { setState(() { _showMenu = false; }); _showScanDialog(); }),
-                      _MenuItem(icon: 'lock.svg', label: 'Rejoindre par code', onTap: () { setState(() { _showMenu = false; }); _showJoinByCodeDialog(); }),
+                      _MenuItem(icon: 'lock.svg', label: 'Rejoindre un projet', onTap: () { setState(() { _showMenu = false; }); _showJoinByCodeDialog(); }),
                       _MenuItem(icon: 'search.svg', label: 'Rechercher', onTap: () { setState(() { _showMenu = false; _showSearch = true; }); }),
                       Divider(color: ThemeHelper.borderLight(context), height: 1),
                       _MenuItem(icon: 'grid.svg', label: _isGridView ? 'Vue liste' : 'Vue grille', onTap: () { final v = !_isGridView; _saveViewPreference(v); setState(() { _showMenu = false; _isGridView = v; }); }),
@@ -894,15 +895,17 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
       final name = _newNameController.text;
       final project = await _backend.createProject(name, _newDescController.text, apiKey: _apiKeyController.text, backendUrl: _backendUrlController.text);
       final projectId = project['id'] as String;
+      final prefs = await SharedPreferences.getInstance();
       if (_backendUrlController.text.trim().isNotEmpty) {
-        final prefs = await SharedPreferences.getInstance();
         await prefs.setBool('has_backend', true);
         if (mounted) setState(() => _hasBackend = true);
       }
       // Add creator as admin member for this project
       final orgs = await _backend.getOrganizations();
       if (orgs.isNotEmpty) {
-        await _backend.addMember(orgs.first['id'] as String, 'Admin', 'admin@prone.app', 'admin', projectId: projectId);
+        final creatorName = (prefs.getString('display_name') ?? '').trim();
+        final creator = await _backend.addMember(orgs.first['id'] as String, creatorName.isEmpty ? 'Admin' : creatorName, 'admin@prone.app', 'admin', projectId: projectId);
+        await prefs.setString('member_id_$projectId', (creator['id'] as String?) ?? '');
       }
       setState(() {
         _showCreateForm = false;
@@ -923,85 +926,122 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
   }
 
   void _showJoinByCodeDialog() {
-    final codeController = TextEditingController();
+    final inviteController = TextEditingController();
+    final nameController = TextEditingController();
     final surfaceColor = ThemeHelper.surface(context);
     final borderColor = ThemeHelper.borderLight(context);
     final textColor = ThemeHelper.text(context);
     final textDimColor = ThemeHelper.textDim(context);
+    SharedPreferences.getInstance().then((prefs) {
+      final saved = prefs.getString('display_name') ?? '';
+      if (saved.isNotEmpty) nameController.text = saved;
+    });
 
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
-      builder: (context) => ClipRRect(
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-          child: Container(
-            padding: EdgeInsets.fromLTRB(24, 24, 24, MediaQuery.of(context).viewInsets.bottom + 24),
-            decoration: BoxDecoration(color: surfaceColor.withOpacity(0.95), borderRadius: const BorderRadius.vertical(top: Radius.circular(24))),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(width: 40, height: 4, decoration: BoxDecoration(color: borderColor, borderRadius: BorderRadius.circular(2))),
-                const SizedBox(height: 20),
-                Row(
-                  children: [
-                    SvgPicture.asset('assets/icons/lock.svg', width: 20, height: 20, colorFilter: const ColorFilter.mode(AppColors.warning, BlendMode.srcIn)),
-                    const SizedBox(width: 8),
-                    Text('Rejoindre par code', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Text('Entrez le code a 6 chiffres', style: TextStyle(fontSize: 13, color: textDimColor)),
-                const SizedBox(height: 20),
-                TextField(
-                  controller: codeController,
-                  keyboardType: TextInputType.number,
-                  maxLength: 6,
-                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w600, color: textColor, letterSpacing: 8),
-                  textAlign: TextAlign.center,
-                  decoration: InputDecoration(
-                    hintText: '000000',
-                    hintStyle: TextStyle(color: textDimColor.withOpacity(0.3), letterSpacing: 8),
-                    filled: true, fillColor: ThemeHelper.bg(context),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: borderColor)),
-                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.warning)),
-                    counterText: '',
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheetState) => ClipRRect(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+            child: Container(
+              padding: EdgeInsets.fromLTRB(24, 24, 24, MediaQuery.of(context).viewInsets.bottom + 24),
+              decoration: BoxDecoration(color: surfaceColor.withOpacity(0.95), borderRadius: const BorderRadius.vertical(top: Radius.circular(24))),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(width: 40, height: 4, decoration: BoxDecoration(color: borderColor, borderRadius: BorderRadius.circular(2))),
+                  const SizedBox(height: 20),
+                  Row(
+                    children: [
+                      SvgPicture.asset('assets/icons/lock.svg', width: 20, height: 20, colorFilter: const ColorFilter.mode(AppColors.warning, BlendMode.srcIn)),
+                      const SizedBox(width: 8),
+                      Text('Rejoindre un projet', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
+                    ],
                   ),
-                ),
-                const SizedBox(height: 20),
-                Row(
-                  children: [
-                    Expanded(child: GestureDetector(
-                      onTap: () => Navigator.pop(context),
-                      child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)), child: Center(child: Text('Annuler', style: TextStyle(color: textDimColor, fontSize: 14)))),
-                    )),
-                    const SizedBox(width: 12),
-                    Expanded(child: GestureDetector(
-                      onTap: () async {
-                        if (codeController.text.length == 6) {
-                          final project = await _backend.findByJoinCode(codeController.text);
-                          if (project != null) {
-                            Navigator.pop(context);
-                            final orgs = await _backend.getOrganizations();
-                            if (orgs.isNotEmpty) {
-                              await _backend.addMember(orgs.first['id'], 'Membre', 'membre@prone.app', 'membre', projectId: project['id']);
-                            }
-                            _loadProjects();
-                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Vous avez rejoint ${project['name']}'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
-                          } else {
-                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Code invalide'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                  const SizedBox(height: 8),
+                  Text('Collez le lien ou le code d\'invitation reçu', style: TextStyle(fontSize: 13, color: textDimColor)),
+                  const SizedBox(height: 20),
+                  Text('Lien ou code', style: TextStyle(fontSize: 12, color: textDimColor)),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: inviteController,
+                    maxLines: 3,
+                    minLines: 1,
+                    style: TextStyle(fontSize: 13, color: textColor, fontFamily: 'monospace'),
+                    decoration: InputDecoration(
+                      hintText: 'prone://join/...  ou  PRONE:...',
+                      hintStyle: TextStyle(color: textDimColor.withOpacity(0.5), fontFamily: 'monospace'),
+                      filled: true,
+                      fillColor: ThemeHelper.bg(context),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: borderColor)),
+                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.primary)),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text('Votre nom', style: TextStyle(fontSize: 12, color: textDimColor)),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: nameController,
+                    style: TextStyle(fontSize: 14, color: textColor),
+                    decoration: InputDecoration(
+                      hintText: 'Comment les autres vous verront',
+                      hintStyle: TextStyle(color: textDimColor.withOpacity(0.5)),
+                      filled: true,
+                      fillColor: ThemeHelper.bg(context),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: borderColor)),
+                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.primary)),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  Row(
+                    children: [
+                      Expanded(child: GestureDetector(
+                        onTap: () => Navigator.pop(context),
+                        child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)), child: Center(child: Text('Annuler', style: TextStyle(color: textDimColor, fontSize: 14)))),
+                      )),
+                      const SizedBox(width: 12),
+                      Expanded(child: GestureDetector(
+                        onTap: () async {
+                          final raw = inviteController.text.trim();
+                          if (raw.isEmpty) {
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Collez le lien ou le code d\'invitation'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                            return;
                           }
-                        }
-                      },
-                      child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Rejoindre', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))),
-                    )),
-                  ],
-                ),
-              ],
+                          final name = nameController.text.trim();
+                          if (name.isNotEmpty) {
+                            final prefs = await SharedPreferences.getInstance();
+                            await prefs.setString('display_name', name);
+                          }
+                          final payload = InvitePayload.tryParse(raw);
+                          final legacy = payload == null ? InvitePayload.legacyProjectId(raw) : null;
+                          if (payload != null || legacy != null) {
+                            Navigator.pop(context);
+                            _runImportAnimation(raw);
+                            return;
+                          }
+                          if (RegExp(r'^\d{6}$').hasMatch(raw)) {
+                            final project = await _backend.findByJoinCode(raw);
+                            if (project != null) {
+                              Navigator.pop(context);
+                              _runImportAnimation('${InvitePayload.legacyPrefix}${project['id']}');
+                              return;
+                            }
+                          }
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Lien ou code invalide'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                        },
+                        child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Rejoindre', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))),
+                      )),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -1024,12 +1064,21 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
     ));
   }
 
-  void _runImportAnimation(String link) {
+  void _runImportAnimation(String raw) {
+    final payload = InvitePayload.tryParse(raw);
+    final legacyId = payload == null ? InvitePayload.legacyProjectId(raw) : null;
+    if (payload == null && legacyId == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Lien ou code d\'invitation invalide'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+      return;
+    }
+
+    final projectName = payload?.name ?? 'ce projet';
+    final hasBackend = payload?.hasBackend ?? true;
     final surfaceColor = ThemeHelper.surface(context);
     final borderColor = ThemeHelper.borderLight(context);
     final textColor = ThemeHelper.text(context);
     final textDimColor = ThemeHelper.textDim(context);
-    final projectId = link.replaceFirst('prone://invite/', '');
 
     showDialog(
       context: context,
@@ -1050,7 +1099,6 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // Animated transfer icon
                   SizedBox(
                     width: 120,
                     height: 120,
@@ -1093,30 +1141,33 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
                             gradient: AppColors.gradient,
                             boxShadow: [BoxShadow(color: AppColors.primary.withOpacity(0.4), blurRadius: 20)],
                           ),
-                          child: SvgPicture.asset('assets/icons/download.svg', width: 24, height: 24, colorFilter: ColorFilter.mode(Colors.white, BlendMode.srcIn)),
+                          child: SvgPicture.asset('assets/icons/download.svg', width: 24, height: 24, colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn)),
                         ),
                       ],
                     ),
                   ),
                   const SizedBox(height: 24),
-                  Text('Intégration en cours...', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
+                  Text('Rejoignez « $projectName »', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
                   const SizedBox(height: 8),
-                  Text('Transfert des données du projet', style: TextStyle(fontSize: 13, color: textDimColor)),
+                  Text(
+                    hasBackend ? 'Connexion au backend du projet' : 'Ce projet n\'a pas encore de backend connecté',
+                    style: TextStyle(fontSize: 13, color: textDimColor),
+                    textAlign: TextAlign.center,
+                  ),
                   const SizedBox(height: 20),
                   TweenAnimationBuilder<double>(
                     tween: Tween(begin: 0.0, end: 1.0),
-                    duration: const Duration(milliseconds: 2800),
+                    duration: const Duration(milliseconds: 2200),
                     onEnd: () async {
-                      await _doImport(projectId);
-                      if (ctx.mounted) {
-                        Navigator.pop(ctx);
-                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                          content: const Text('Projet intégré avec succès !'),
-                          backgroundColor: AppColors.success,
-                          behavior: SnackBarBehavior.floating,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        ));
-                      }
+                      final error = await _joinProject(payload, legacyId);
+                      if (ctx.mounted) Navigator.pop(ctx);
+                      if (!mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                        content: Text(error ?? 'Vous avez rejoint « $projectName » !'),
+                        backgroundColor: error == null ? AppColors.success : AppColors.error,
+                        behavior: SnackBarBehavior.floating,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ));
                     },
                     builder: (context, value, child) {
                       return Column(
@@ -1145,38 +1196,90 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
     );
   }
 
-  Future<void> _doImport(String projectId) async {
-    final projects = await _backend.getProjects();
-    final sourceProject = projects.where((p) => p['id'] == projectId).toList();
+  Future<String?> _joinProject(InvitePayload? payload, String? legacyId) async {
+    final orgs = await _backend.getOrganizations();
+    final orgId = orgs.isNotEmpty ? ((orgs.first['id'] as String?) ?? '') : '';
 
-    String projectName = 'Projet importé';
-    String projectDesc = '';
+    String name = '';
+    String desc = '';
     String apiKey = '';
     String backendUrl = '';
     String photo = '';
+    String inviter = '';
 
-    if (sourceProject.isNotEmpty) {
-      final p = sourceProject.first;
-      projectName = p['name'] ?? 'Projet importé';
-      projectDesc = p['description'] ?? '';
-      apiKey = p['api_key'] ?? '';
-      backendUrl = p['backend_url'] ?? '';
-      photo = p['photo'] ?? '';
+    if (payload != null) {
+      name = payload.name;
+      desc = payload.description;
+      apiKey = payload.apiKey;
+      backendUrl = payload.backendUrl;
+      photo = payload.photo;
+      inviter = payload.inviter;
+    } else if (legacyId != null) {
+      final projects = await _backend.getProjects();
+      final src = projects.where((p) => p['id'] == legacyId).toList();
+      if (src.isEmpty) {
+        return 'QR obsolète : régénérez-le depuis la page projet (Inviter).';
+      }
+      final p = src.first;
+      name = (p['name'] as String?) ?? 'Projet';
+      desc = (p['description'] as String?) ?? '';
+      apiKey = (p['api_key'] as String?) ?? '';
+      backendUrl = (p['backend_url'] as String?) ?? '';
+      photo = (p['photo'] as String?) ?? '';
+      inviter = '';
     } else {
-      projectDesc = 'Intégré via QR Code';
+      return 'Invitation invalide.';
     }
 
-    await _backend.createProject(projectName, projectDesc,
-      apiKey: apiKey, backendUrl: backendUrl, photo: photo,
-    );
+    name = name.trim();
+    if (name.isEmpty) return 'Invitation invalide : nom de projet manquant.';
 
-    final orgs = await _backend.getOrganizations();
-    if (orgs.isNotEmpty) {
-      await _backend.addMember(orgs.first['id'], 'Utilisateur local', 'local@prone.app', 'viewer');
+    final prefs = await SharedPreferences.getInstance();
+    final displayName = (prefs.getString('display_name') ?? '').trim();
+    final meName = displayName.isEmpty ? 'Nouveau membre' : displayName;
+
+    final existing = await _backend.getProjects();
+    final duplicates = existing
+        .where((p) =>
+            ((p['name'] as String?) ?? '').trim() == name &&
+            ((p['backend_url'] as String?) ?? '').trim() == backendUrl.trim())
+        .toList();
+
+    String projectId;
+    if (duplicates.isNotEmpty) {
+      projectId = duplicates.first['id'] as String;
+    } else {
+      final project = await _backend.createProject(
+        name,
+        desc,
+        apiKey: apiKey,
+        backendUrl: backendUrl,
+        photo: photo,
+        organizationId: orgId,
+      );
+      projectId = project['id'] as String;
+    }
+    await prefs.setBool('has_backend', backendUrl.trim().isNotEmpty);
+
+    final members = await _backend.getMembersByProject(projectId);
+    if (inviter.isNotEmpty && !members.any((m) => ((m['name'] as String?) ?? '') == inviter)) {
+      await _backend.addMember(orgId, inviter, '', 'admin', projectId: projectId);
+    }
+
+    final mine = members.firstWhere(
+      (m) => ((m['name'] as String?) ?? '') == meName,
+      orElse: () => <String, dynamic>{},
+    );
+    if (mine.isNotEmpty) {
+      await prefs.setString('member_id_$projectId', (mine['id'] as String?) ?? '');
+    } else {
+      final me = await _backend.addMember(orgId, meName, '', 'editor', projectId: projectId);
+      await prefs.setString('member_id_$projectId', (me['id'] as String?) ?? '');
     }
 
     _loadProjects();
     if (mounted) setState(() {});
+    return null;
   }
 }
 
