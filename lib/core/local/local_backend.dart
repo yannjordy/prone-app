@@ -72,6 +72,7 @@ class LocalBackend {
       'photo': photo ?? '',
       'join_code': _generateJoinCode(),
       'status': '', 'status_type': 'info', 'status_updated_at': '',
+      'sync_state': 'dirty',
       'is_pinned': 0, 'is_archived': 0, 'is_muted': 0,
       'created_at': now, 'updated_at': now,
     };
@@ -122,6 +123,7 @@ class LocalBackend {
 
   Future<void> updateProject(String id, Map<String, dynamic> updates) async {
     updates['updated_at'] = DateTime.now().toIso8601String();
+    updates['sync_state'] = 'dirty';
     await _db.update('projects', updates, where: 'id = ?', whereArgs: [id]);
   }
 
@@ -136,12 +138,34 @@ class LocalBackend {
     return await _db.query('messages', where: 'project_id = ?', whereArgs: [projectId], orderBy: 'created_at ASC');
   }
 
-  Future<Map<String, dynamic>> sendMessage(String projectId, String content, {String sender = 'user'}) async {
-    final id = _uuid.v4();
+  Future<Map<String, dynamic>> sendMessage(
+    String projectId,
+    String content, {
+    String sender = 'user',
+    String senderId = '',
+    String senderName = '',
+    String senderPhoto = '',
+    String replyTo = '',
+    String? explicitId,
+  }) async {
+    final id = (explicitId != null && explicitId.isNotEmpty) ? explicitId : _uuid.v4();
     final now = DateTime.now().toIso8601String();
-    final msg = {'id': id, 'project_id': projectId, 'content': content, 'sender': sender, 'is_bot': sender == 'bot' ? 1 : 0, 'created_at': now};
+    final msg = {
+      'id': id,
+      'project_id': projectId,
+      'content': content,
+      'sender': sender,
+      'sender_id': senderId,
+      'sender_name': senderName,
+      'sender_photo': senderPhoto,
+      'reply_to': replyTo,
+      'is_bot': sender == 'bot' ? 1 : 0,
+      'created_at': now,
+      'updated_at': now,
+      'sync_state': 'dirty',
+    };
     await _db.insert('messages', msg);
-    await _db.update('projects', {'updated_at': now}, where: 'id = ?', whereArgs: [projectId]);
+    await _db.update('projects', {'updated_at': now, 'sync_state': 'dirty'}, where: 'id = ?', whereArgs: [projectId]);
     return msg;
   }
 
@@ -258,12 +282,29 @@ class LocalBackend {
     return await _db.query('members', where: 'project_id = ?', whereArgs: [projectId]);
   }
 
-  Future<Map<String, dynamic>> addMember(String organizationId, String name, String email, String role, {String? projectId}) async {
+  Future<Map<String, dynamic>> addMember(String organizationId, String name, String email, String role, {String? projectId, String? photo}) async {
     final id = _uuid.v4();
     final now = DateTime.now().toIso8601String();
-    final member = {'id': id, 'organization_id': organizationId, 'project_id': projectId ?? '', 'name': name, 'email': email, 'role': role, 'created_at': now};
+    final member = {
+      'id': id,
+      'organization_id': organizationId,
+      'project_id': projectId ?? '',
+      'name': name,
+      'email': email,
+      'role': role,
+      'photo': photo ?? '',
+      'sync_state': 'dirty',
+      'created_at': now,
+      'updated_at': now,
+    };
     await _db.insert('members', member);
     return member;
+  }
+
+  Future<void> updateMember(String memberId, Map<String, dynamic> updates) async {
+    updates['updated_at'] = DateTime.now().toIso8601String();
+    updates['sync_state'] = 'dirty';
+    await _db.update('members', updates, where: 'id = ?', whereArgs: [memberId]);
   }
 
   Future<void> removeMember(String organizationId, String memberId) async {
@@ -302,6 +343,7 @@ class LocalBackend {
       'status': status,
       'status_type': statusType ?? 'info',
       'status_updated_at': DateTime.now().toIso8601String(),
+      'sync_state': 'dirty',
     }, where: 'id = ?', whereArgs: [projectId]);
   }
 }

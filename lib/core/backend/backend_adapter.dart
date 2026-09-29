@@ -79,6 +79,13 @@ class BackendAdapter {
 
   static final _dio = Dio();
 
+  /// PostgREST/Supabase renvoie 206 Partial Content des qu'un Content-Range
+  /// est present (Prefer: count=exact, limit/offset). Tout code 2xx est donc
+  /// une reussite : exiger 200 faisait echouer la lecture des donnees.
+  static bool _isSuccess(int? status) => status != null && status >= 200 && status < 300;
+
+  static String _statusError(int? status) => 'HTTP ${status ?? 0}';
+
   static Future<BackendCheckResult> check(String url, String apiKey, {String? type}) async {
     BackendAdapter? adapter;
     String healthTarget = url;
@@ -161,30 +168,64 @@ class BackendAdapter {
   }
 
   static Future<List<String>> _supabaseTables(String url, String apiKey) async {
+    final clean = url.replaceAll(RegExp(r'/+$'), '');
+    final headers = <String, String>{
+      'apikey': apiKey,
+      'Authorization': 'Bearer $apiKey',
+      'Accept': 'application/openapi+json, application/json',
+    };
     try {
-      final dio = Dio();
-      final commonTables = [
-        'users', 'profiles', 'products', 'orders', 'categories', 'messages',
-        'produits', 'commandes', 'clients', 'produits', 'categories',
-        'settings', 'config', 'logs', 'sessions', 'tokens',
-      ];
-      final found = <String>[];
-      for (final table in commonTables) {
-        try {
-          final resp = await dio.get(
-            '$url/rest/v1/$table?select=id&limit=1',
-            options: Options(headers: {
-              'apikey': apiKey,
-              'Authorization': 'Bearer $apiKey',
-            }, receiveTimeout: const Duration(seconds: 5)),
-          );
-          if (resp.statusCode == 200) found.add(table);
-        } catch (_) {}
+      // Source de verite : le catalogue OpenAPI de PostgREST listant
+      // TOUTES les tables exposees, pas une liste devinee.
+      final resp = await _dio.get(
+        '$clean/rest/v1/',
+        options: Options(headers: headers, receiveTimeout: const Duration(seconds: 15), validateStatus: (s) => s != null && s < 500),
+      );
+      if (_isSuccess(resp.statusCode) && resp.data is Map) {
+        final names = _openApiTableNames(Map<String, dynamic>.from(resp.data as Map));
+        if (names.isNotEmpty) return names;
       }
-      return found;
-    } catch (_) {
-      return [];
+    } catch (_) {}
+
+    // Repli : sonde les noms de tables les plus courants.
+    const fallback = [
+      'profiles', 'users', 'orders', 'order_items', 'products', 'categories',
+      'messages', 'members', 'projects', 'organizations', 'produits',
+      'commandes', 'clients', 'settings', 'config', 'logs', 'sessions',
+      '_prone_messages', '_prone_members', '_prone_projects',
+    ];
+    final found = <String>[];
+    for (final table in fallback) {
+      try {
+        final resp = await _dio.get(
+          '$clean/rest/v1/$table?select=id&limit=1',
+          options: Options(headers: {
+            'apikey': apiKey,
+            'Authorization': 'Bearer $apiKey',
+          }, receiveTimeout: const Duration(seconds: 5), validateStatus: (s) => s != null && s < 500),
+        );
+        if (_isSuccess(resp.statusCode)) found.add(table);
+      } catch (_) {}
     }
+    return found;
+  }
+
+  static List<String> _openApiTableNames(Map<String, dynamic> spec) {
+    Object? schemas;
+    final components = spec['components'];
+    if (components is Map) schemas = components['schemas'];
+    if (schemas == null) schemas = spec['definitions'];
+    final names = <String>[];
+    if (schemas is Map) {
+      for (final key in schemas.keys) {
+        final n = key.toString();
+        // PostgREST expose aussi les types auxiliaires ; on garde les objets plats.
+        if (n.startsWith('rpc.')) continue;
+        names.add(n);
+      }
+    }
+    names.sort();
+    return names;
   }
 
   static Future<List<String>> _probeEndpoints(String url, String apiKey) async {
@@ -201,7 +242,7 @@ class BackendAdapter {
           '$clean$ep',
           options: Options(headers: headers, receiveTimeout: const Duration(seconds: 5), validateStatus: (s) => s != null && s < 500),
         );
-        if (resp.statusCode == 200) found.add(ep);
+        if (resp.statusCode != null && resp.statusCode! >= 200 && resp.statusCode! < 300) found.add(ep);
       } catch (_) {}
     }
     return found;
@@ -263,12 +304,13 @@ class BackendAdapter {
         ),
       );
       _log('GET', target, status: resp.statusCode, ms: DateTime.now().difference(sw).inMilliseconds);
-      if (resp.statusCode != 200) {
+      if (!_isSuccess(resp.statusCode)) {
         return TableResult(
           table: table,
           offset: offset,
           limit: limit,
-          error: 'HTTP ${resp.statusCode}',
+          error: _statusError(resp.statusCode),
+          offline: resp.statusCode == 0,
         );
       }
 
@@ -351,8 +393,8 @@ class BackendAdapter {
           options: Options(headers: headers, receiveTimeout: const Duration(seconds: 15), validateStatus: (s) => s != null && s < 500),
         );
         _log('GET', target, status: resp.statusCode, ms: DateTime.now().difference(sw).inMilliseconds);
-        if (resp.statusCode != 200) {
-          return CountResult(table: table, error: 'HTTP ${resp.statusCode}');
+        if (!_isSuccess(resp.statusCode)) {
+          return CountResult(table: table, error: _statusError(resp.statusCode));
         }
         final total = _parseContentRange(resp.headers.value('content-range') ?? resp.headers.value('Content-Range'));
         if (total != null) {
@@ -373,8 +415,8 @@ class BackendAdapter {
         '$clean/$table?limit=$probeLimit',
         options: Options(headers: adapter.headers, receiveTimeout: const Duration(seconds: 20), validateStatus: (s) => s != null && s < 500),
       );
-      if (resp.statusCode != 200) {
-        return CountResult(table: table, error: 'HTTP ${resp.statusCode}');
+      if (!_isSuccess(resp.statusCode)) {
+        return CountResult(table: table, error: _statusError(resp.statusCode));
       }
       final data = resp.data;
       final n = data is List ? data.length : (data is Map ? 1 : 0);
@@ -404,8 +446,11 @@ class BackendAdapter {
       try {
         final resp = await _dio.get(
           '$clean/rest/v1/',
-          options: Options(headers: adapter.headers, receiveTimeout: const Duration(seconds: 15)),
+          options: Options(headers: adapter.headers, receiveTimeout: const Duration(seconds: 15), validateStatus: (st) => st != null && st < 500),
         );
+        if (!_isSuccess(resp.statusCode)) {
+          return SchemaResult(table: table, error: _statusError(resp.statusCode));
+        }
         final spec = resp.data;
         if (spec is Map) {
           final components = spec['components'];
@@ -431,7 +476,7 @@ class BackendAdapter {
         target,
         options: Options(headers: adapter.headers, receiveTimeout: const Duration(seconds: 15), validateStatus: (s) => s != null && s < 500),
       );
-      if (resp.statusCode == 200 && resp.data is List && (resp.data as List).isNotEmpty) {
+      if (_isSuccess(resp.statusCode) && resp.data is List && (resp.data as List).isNotEmpty) {
         final row = (resp.data as List).first;
         if (row is Map) {
           final cols = <ColumnInfo>[];
@@ -440,8 +485,12 @@ class BackendAdapter {
           });
           return SchemaResult(table: table, columns: cols, inferred: true);
         }
+        return SchemaResult(table: table, columns: const [], inferred: true);
       }
-      return SchemaResult(table: table, error: 'HTTP ${resp.statusCode}');
+      if (_isSuccess(resp.statusCode)) {
+        return SchemaResult(table: table, columns: const [], inferred: true);
+      }
+      return SchemaResult(table: table, error: _statusError(resp.statusCode));
     } on DioException catch (e) {
       return SchemaResult(table: table, error: _humanError(e), offline: isOfflineError(e));
     }

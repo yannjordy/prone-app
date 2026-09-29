@@ -6,6 +6,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 import '../../app/app.dart';
 import '../../core/local/local_backend.dart';
+import '../../core/local/user_profile.dart';
 import '../../core/utils/photo_picker_helper.dart';
 
 class OrgListScreen extends StatefulWidget {
@@ -214,7 +215,19 @@ class _OrgListScreenState extends State<OrgListScreen> {
                         onTap: () async {
                           if (_nameController.text.isNotEmpty) {
                             final photo = selectedPhoto != null ? base64Encode(selectedPhoto!) : null;
-                            await _backend.createOrganization(_nameController.text, _descController.text, photo: photo);
+                            final org = await _backend.createOrganization(_nameController.text, _descController.text, photo: photo);
+                            final profile = await UserProfile.load();
+                            final orgId = (org['id'] as String?) ?? '';
+                            if (orgId.isNotEmpty) {
+                              final ownerName = profile['name']!.trim();
+                              await _backend.addMember(
+                                orgId,
+                                ownerName.isEmpty ? 'Admin' : ownerName,
+                                profile['email']!.trim(),
+                                'admin',
+                                photo: profile['photo'],
+                              );
+                            }
                             Navigator.pop(context);
                             _loadOrgs();
                             ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Organisation creee'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));

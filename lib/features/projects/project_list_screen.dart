@@ -11,6 +11,7 @@ import '../../app/app.dart';
 import '../../core/local/local_backend.dart';
 import '../../core/backend/backend_adapter.dart';
 import '../../core/backend/invite_payload.dart';
+import '../../core/local/user_profile.dart';
 import 'qr_scanner_page.dart';
 
 class ProjectListScreen extends StatefulWidget {
@@ -903,8 +904,16 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
       // Add creator as admin member for this project
       final orgs = await _backend.getOrganizations();
       if (orgs.isNotEmpty) {
-        final creatorName = (prefs.getString('display_name') ?? '').trim();
-        final creator = await _backend.addMember(orgs.first['id'] as String, creatorName.isEmpty ? 'Admin' : creatorName, 'admin@prone.app', 'admin', projectId: projectId);
+        final profile = await UserProfile.load();
+        final creatorName = profile['name']!.trim();
+        final creator = await _backend.addMember(
+          orgs.first['id'] as String,
+          creatorName.isEmpty ? 'Admin' : creatorName,
+          profile['email']!.trim(),
+          'admin',
+          projectId: projectId,
+          photo: profile['photo'],
+        );
         await prefs.setString('member_id_$projectId', (creator['id'] as String?) ?? '');
       }
       setState(() {
@@ -932,9 +941,10 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
     final borderColor = ThemeHelper.borderLight(context);
     final textColor = ThemeHelper.text(context);
     final textDimColor = ThemeHelper.textDim(context);
-    SharedPreferences.getInstance().then((prefs) {
-      final saved = prefs.getString('display_name') ?? '';
-      if (saved.isNotEmpty) nameController.text = saved;
+    UserProfile.load().then((profile) {
+      if (profile['name']!.isNotEmpty && nameController.text.isEmpty) {
+        nameController.text = profile['name']!;
+      }
     });
 
     showModalBottomSheet(
@@ -1015,8 +1025,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
                           }
                           final name = nameController.text.trim();
                           if (name.isNotEmpty) {
-                            final prefs = await SharedPreferences.getInstance();
-                            await prefs.setString('display_name', name);
+                            await UserProfile.save(name: name);
                           }
                           final payload = InvitePayload.tryParse(raw);
                           final legacy = payload == null ? InvitePayload.legacyProjectId(raw) : null;
@@ -1235,8 +1244,11 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
     if (name.isEmpty) return 'Invitation invalide : nom de projet manquant.';
 
     final prefs = await SharedPreferences.getInstance();
-    final displayName = (prefs.getString('display_name') ?? '').trim();
-    final meName = displayName.isEmpty ? 'Nouveau membre' : displayName;
+    final profile = await UserProfile.load();
+    final profileName = profile['name']!.trim();
+    final meName = profileName.isEmpty ? 'Nouveau membre' : profileName;
+    final meEmail = profile['email']!.trim();
+    final mePhoto = profile['photo']!;
 
     final existing = await _backend.getProjects();
     final duplicates = existing
@@ -1272,8 +1284,12 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
     );
     if (mine.isNotEmpty) {
       await prefs.setString('member_id_$projectId', (mine['id'] as String?) ?? '');
+      await _backend.updateMember((mine['id'] as String?) ?? '', {
+        if (meEmail.isNotEmpty) 'email': meEmail,
+        if (mePhoto.isNotEmpty) 'photo': mePhoto,
+      });
     } else {
-      final me = await _backend.addMember(orgId, meName, '', 'editor', projectId: projectId);
+      final me = await _backend.addMember(orgId, meName, meEmail, 'editor', projectId: projectId, photo: mePhoto);
       await prefs.setString('member_id_$projectId', (me['id'] as String?) ?? '');
     }
 

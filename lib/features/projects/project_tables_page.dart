@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
@@ -39,14 +40,29 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
   int _tab = 0;
   String? _idColumn;
 
+  Timer? _autoRefresh;
+
   @override
   void initState() {
     super.initState();
     _loadTables();
+    // L'inspecteur doit rester synchrone avec la base et l'app Prone :
+    // on resillonne les lignes et la liste des tables en arriere-plan.
+    _autoRefresh = Timer.periodic(const Duration(seconds: 4), (_) => _tick());
+  }
+
+  Future<void> _tick() async {
+    if (!mounted || _loading || _loadingRows) return;
+    if (_selectedTable == null) {
+      await _loadTables();
+    } else {
+      await _loadRows();
+    }
   }
 
   @override
   void dispose() {
+    _autoRefresh?.cancel();
     _tableSearchController.dispose();
     _valueSearchController.dispose();
     super.dispose();
@@ -74,17 +90,20 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
       final tables = await BackendAdapter.listTables(_backendUrl, _apiKey, type: _backendType);
       if (!mounted) return;
       setState(() {
-        _tables = tables;
+        if (tables.isNotEmpty) _tables = tables;
         _loading = false;
         _offline = false;
+        if (tables.isNotEmpty) _pageError = null;
       });
-      if (tables.isEmpty) {
+      if (tables.isEmpty && _tables.isEmpty) {
         setState(() => _pageError = 'Aucune table detectee sur ce backend.');
       }
     } catch (e) {
       if (!mounted) return;
-      setState(() { _loading = false; _pageError = e.toString(); });
-      await BackendErrorStore.instance.record(widget.projectId, 'Lecture des tables impossible: $e', level: ErrorLevel.error);
+      setState(() { _loading = false; _pageError = _tables.isNotEmpty ? null : e.toString(); });
+      if (_tables.isEmpty) {
+        await BackendErrorStore.instance.record(widget.projectId, 'Lecture des tables impossible: $e', level: ErrorLevel.error);
+      }
     }
   }
 
@@ -139,13 +158,19 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
       );
       if (!mounted) return;
       setState(() {
-        _result = res;
+        // Un echec de rafraichissement ne doit jamais effacer des donnees
+        // deja affichees : on conserve alors le dernier resultat valide.
+        if (res.ok || _result == null) _result = res;
         _page = targetPage;
         _loadingRows = false;
         _offline = res.offline;
-        if (res.error != null) _pageError = res.error;
+        if (res.error != null && (res.rows.isNotEmpty || _result == null)) {
+          _pageError = res.error;
+        } else if (res.ok) {
+          _pageError = null;
+        }
       });
-      if (!res.ok) {
+      if (!res.ok && (res.rows.isNotEmpty || _result == null)) {
         await BackendErrorStore.instance.record(
           widget.projectId,
           'Lecture de $table: ${res.error}',

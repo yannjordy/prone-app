@@ -14,7 +14,9 @@ import '../../core/commands/command_library.dart';
 import '../../core/security/bot_protector.dart';
 import '../../core/backend/backend_adapter.dart';
 import '../../core/backend/invite_payload.dart';
+import '../../core/backend/project_sync.dart';
 import '../../core/local/local_backend.dart';
+import '../../core/local/user_profile.dart';
 import '../../core/utils/photo_picker_helper.dart';
 import '../../core/offline/offline_queue.dart';
 import '../../core/notifications/error_store.dart';
@@ -34,6 +36,8 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   final _scrollController = ScrollController();
   final List<_ChatMessage> _messages = [];
   bool _showCommands = false;
+  bool _showMoreSettings = false;
+  bool _showAllCommands = false;
   bool _showSettings = false;
   bool _isTyping = false;
   bool _isAdmin = true;
@@ -63,10 +67,15 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
 
   _Member? _currentUser;
 
+  String _myMemberId = '';
+  bool _refreshing = false;
+  SyncStats? _syncStats;
+
   @override
   void initState() {
     super.initState();
     _currentUser = _Member(name: 'Vous', initials: 'VO', color: AppColors.primary, isOnline: true);
+    ProjectSync.instance.onSynced = _onSynced;
     _controller.addListener(() {
       final text = _controller.text;
       final hasMention = text.contains(RegExp(r'@\w+\s*$'));
@@ -77,6 +86,16 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     _loadProjectData();
     _refreshAlertCount();
     _refreshPendingCount();
+  }
+
+  void _onSynced(SyncStats stats) {
+    if (!mounted) return;
+    _syncStats = stats;
+    if (stats.pulledRows > 0 && !_refreshing) {
+      _loadProjectData();
+    } else {
+      setState(() {});
+    }
   }
 
   Future<void> _refreshAlertCount() async {
@@ -202,6 +221,10 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   }
 
   Future<void> _loadProjectData() async {
+    if (_refreshing) return;
+    _refreshing = true;
+    final memberById = <String, _Member>{};
+    final memberByName = <String, _Member>{};
     final projects = await _backend.getProjects();
     final project = projects.where((p) => p['id'] == widget.projectId).toList();
     if (project.isNotEmpty) {
@@ -255,7 +278,11 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         final colors = [AppColors.primary, const Color(0xFF00CEC9), const Color(0xFF00B894), const Color(0xFF6C5CE7), const Color(0xFFE17055)];
         final colorVal = colors[hash.abs() % colors.length];
         final initials = name.split(' ').where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join().toUpperCase();
-        memberList.add(_Member(name: name.isEmpty ? email : name, initials: initials.isEmpty ? '?' : initials, color: colorVal, isOnline: true, photo: photoBytes, role: role, email: email));
+        final member = _Member(name: name.isEmpty ? email : name, initials: initials.isEmpty ? '?' : initials, color: colorVal, isOnline: true, photo: photoBytes, role: role, email: email);
+        memberList.add(member);
+        final rowId = (m['id'] as String?) ?? '';
+        if (rowId.isNotEmpty) memberById[rowId] = member;
+        if (name.isNotEmpty) memberByName.putIfAbsent(name.toLowerCase(), () => member);
       }
       // Identite locale : le membre cree sur cet appareil (creation ou join)
       String myMemberId = '';
@@ -271,6 +298,23 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         }
       }
       me ??= members.isNotEmpty ? members.first : null;
+      _myMemberId = (me != null ? (me['id'] as String?) : null) ?? myMemberId;
+      if (me != null) {
+        // Le profil est la source unique : on repousse nom/email/photo
+        // sur la fiche membre locale de ce projet.
+        final profile = await UserProfile.load();
+        final pName = profile['name']!.trim();
+        final pEmail = profile['email']!.trim();
+        final pPhoto = profile['photo']!;
+        final updates = <String, dynamic>{};
+        if (pName.isNotEmpty && ((me['name'] as String?) ?? '') != pName) updates['name'] = pName;
+        if (pEmail.isNotEmpty && ((me['email'] as String?) ?? '') != pEmail) updates['email'] = pEmail;
+        if (pPhoto.isNotEmpty && ((me['photo'] as String?) ?? '') != pPhoto) updates['photo'] = pPhoto;
+        if (updates.isNotEmpty && ((me['id'] as String?) ?? '').isNotEmpty) {
+          await _backend.updateMember((me['id'] as String?) ?? '', updates);
+          me = <String, dynamic>{...me, ...updates};
+        }
+      }
       if (me != null) {
         final myName = (me['name'] as String?) ?? 'Vous';
         _currentUser = _Member(
@@ -289,16 +333,54 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         _isAdmin = _userRole == 'admin';
       });
     }
-    final msgs = await _backend.getMessages(widget.projectId);
+    var msgs = await _backend.getMessages(widget.projectId);
+    if (msgs.isEmpty) {
+      final botName = await _getBotName();
+      await _backend.sendMessage(
+        widget.projectId,
+        'Bienvenue sur $_projectName !\n\nTapez /help pour voir les commandes disponibles.',
+        sender: 'bot',
+        senderName: botName,
+        explicitId: 'welcome_${widget.projectId}',
+      );
+      msgs = await _backend.getMessages(widget.projectId);
+    }
+    final botMember = _members.isNotEmpty ? _members.first : _currentUser!;
     setState(() {
       _messages.clear();
       for (final m in msgs) {
         final isBot = m['is_bot'] == 1;
+        final senderId = (m['sender_id'] as String?) ?? '';
+        final senderName = (m['sender_name'] as String?) ?? '';
+        final senderPhoto = (m['sender_photo'] as String?) ?? '';
+        _Member sender;
+        bool fromMe = false;
+        if (isBot) {
+          sender = botMember;
+        } else {
+          final byId = senderId.isNotEmpty ? memberById[senderId] : null;
+          if (byId != null) {
+            sender = byId;
+            fromMe = senderId == _myMemberId && _myMemberId.isNotEmpty;
+          } else if (_currentUser != null && senderName.isNotEmpty &&
+              senderName.toLowerCase() == _currentUser!.name.toLowerCase()) {
+            sender = _currentUser!;
+            fromMe = true;
+          } else if (senderName.isNotEmpty) {
+            sender = memberByName[senderName.toLowerCase()] ?? _remoteSender(senderName, senderPhoto);
+          } else {
+            sender = _currentUser ?? botMember;
+            fromMe = senderId == _myMemberId && _myMemberId.isNotEmpty;
+          }
+        }
         _messages.add(_ChatMessage(
-          sender: isBot ? _members.first : _currentUser!,
+          sender: sender,
           text: (m['content'] as String?) ?? '',
           timestamp: DateTime.tryParse((m['created_at'] as String?) ?? '') ?? DateTime.now(),
           id: (m['id'] as String?) ?? '',
+          senderId: senderId,
+          fromMe: fromMe,
+          replyToId: (m['reply_to'] as String?) ?? '',
         ));
       }
     });
@@ -316,6 +398,47 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     });
     // Start bot protector monitoring
     _protector.startMonitoring(_backendUrl, _projectApiKey, _backendType, _onSecurityAlert);
+    // Synchronisation en direct avec les autres membres du projet
+    if (_backendUrl.isNotEmpty) {
+      ProjectSync.instance.startPolling(
+        projectId: widget.projectId,
+        url: _backendUrl,
+        apiKey: _projectApiKey,
+        type: _backendType,
+      );
+    }
+    _refreshing = false;
+  }
+
+  _Member _remoteSender(String name, String photoB64) {
+    final colors = [AppColors.primary, const Color(0xFF00CEC9), const Color(0xFF00B894), const Color(0xFF6C5CE7), const Color(0xFFE17055)];
+    Uint8List? photoBytes;
+    try {
+      if (photoB64.isNotEmpty) photoBytes = base64Decode(photoB64);
+    } catch (_) {}
+    final initials = name.split(' ').where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join().toUpperCase();
+    return _Member(
+      name: name,
+      initials: initials.isEmpty ? '?' : initials,
+      color: colors[name.hashCode.abs() % colors.length],
+      isOnline: false,
+      photo: photoBytes,
+    );
+  }
+
+  static const int _commandsVisible = 8;
+
+  int _visibleCommandCount(List<Command> cmds) => cmds.length <= _commandsVisible ? cmds.length : _commandsVisible;
+
+  int _commandListCount(List<Command> cmds) =>
+      cmds.length > _commandsVisible ? _commandsVisible + 1 : cmds.length;
+
+  int? _indexOfMessage(String id) {
+    if (id.isEmpty) return null;
+    for (var i = 0; i < _messages.length; i++) {
+      if (_messages[i].id == id) return i;
+    }
+    return null;
   }
 
   void _onSecurityAlert(SecurityAlert alert) {
@@ -351,6 +474,8 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
 
   @override
   void dispose() {
+    ProjectSync.instance.stopPolling();
+    ProjectSync.instance.onSynced = null;
     _protector.stopMonitoring();
     _controller.dispose();
     _commandSearchController.dispose();
@@ -516,6 +641,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
                       children: [
                         _SettingsItem(icon: 'users.svg', label: 'Membres', onTap: () {
                           setState(() => _showSettings = false);
@@ -541,6 +667,19 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                           setState(() => _showSettings = false);
                           _showAlertsSheet();
                         }),
+                        if (!_showMoreSettings)
+                          InkWell(
+                            onTap: () => setState(() => _showMoreSettings = true),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                              child: Row(children: [
+                                const Icon(Icons.expand_more, size: 17, color: AppColors.primary),
+                                const SizedBox(width: 12),
+                                Text('Voir plus (5)', style: TextStyle(fontSize: 13, color: AppColors.primary, fontWeight: FontWeight.w600)),
+                              ]),
+                            ),
+                          ),
+                        if (_showMoreSettings) ...[
                         _SettingsItem(icon: 'logs.svg', label: 'Logs', onTap: () {
                           setState(() => _showSettings = false);
                           context.go('/projects/${widget.projectId}/logs');
@@ -561,6 +700,18 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                           setState(() => _showSettings = false);
                           context.go('/projects/${widget.projectId}/executions');
                         }),
+                        InkWell(
+                          onTap: () => setState(() => _showMoreSettings = false),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                            child: Row(children: [
+                              const Icon(Icons.expand_less, size: 17, color: AppColors.primaryLight),
+                              const SizedBox(width: 12),
+                              Text('Voir moins', style: TextStyle(fontSize: 13, color: ThemeHelper.textDim(context), fontWeight: FontWeight.w600)),
+                            ]),
+                          ),
+                        ),
+                        ],
                         Divider(color: ThemeHelper.borderLight(context), height: 1),
                         _SettingsItem(icon: 'settings.svg', label: 'Paramètres', onTap: () {
                           setState(() => _showSettings = false);
@@ -663,8 +814,24 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                                 )
                               : ListView.builder(
                             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                            itemCount: filteredCommands.length,
+                            itemCount: _commandListCount(filteredCommands),
                             itemBuilder: (context, index) {
+                              if (index == _visibleCommandCount(filteredCommands)) {
+                                final rest = filteredCommands.length - index;
+                                if (_showAllCommands) {
+                                  return TextButton.icon(
+                                    onPressed: () => setState(() => _showAllCommands = false),
+                                    icon: const Icon(Icons.expand_less, size: 16, color: AppColors.primaryLight),
+                                    label: Text('Voir moins', style: TextStyle(fontSize: 13, color: ThemeHelper.textDim(context), fontWeight: FontWeight.w600)),
+                                  );
+                                }
+                                if (rest <= 0) return const SizedBox.shrink();
+                                return TextButton.icon(
+                                  onPressed: () => setState(() => _showAllCommands = true),
+                                  icon: const Icon(Icons.expand_more, size: 16, color: AppColors.primary),
+                                  label: Text('Voir plus ($rest)', style: const TextStyle(fontSize: 13, color: AppColors.primary, fontWeight: FontWeight.w600)),
+                                );
+                              }
                               final cmd = filteredCommands[index];
                               return _MenuBtn(icon: cmd.icon, label: '/${cmd.name}', description: cmd.description, onTap: () {
                                 setState(() => _showCommands = false);
@@ -792,7 +959,13 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                       GestureDetector(
                         onTap: () => setState(() {
                           _showCommands = !_showCommands;
-                          if (_showCommands) { _commandSearchController.clear(); _commandQuery = ''; }
+                          if (_showCommands) {
+                            _commandSearchController.clear();
+                            _commandQuery = '';
+                            _showAllCommands = false;
+                          } else {
+                            _showMoreSettings = false;
+                          }
                         }),
                         child: Container(
                           width: 40, height: 40,
@@ -1262,15 +1435,26 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     final project = match.first;
     final orgs = await _backend.getOrganizations();
     final joinCode = await _backend.getOrCreateJoinCode(widget.projectId);
-    final inviter = (_currentUser?.name != null && _currentUser!.name.isNotEmpty && _currentUser!.name != 'Vous')
-        ? _currentUser!.name
-        : 'Un membre de $_projectName';
+    final profileName = await UserProfile.name();
+    final inviter = profileName.isNotEmpty
+        ? profileName
+        : ((_currentUser?.name.isNotEmpty ?? false) && _currentUser!.name != 'Vous')
+            ? _currentUser!.name
+            : 'Un membre de $_projectName';
     final payload = InvitePayload.fromProject(
       project,
       inviter: inviter,
       orgId: orgs.isNotEmpty ? ((orgs.first['id'] as String?) ?? '') : '',
       joinCode: joinCode,
     );
+    int localBytes = 0;
+    try {
+      final msgs = await _backend.getMessages(widget.projectId);
+      final members = await _backend.getMembersByProject(widget.projectId);
+      for (final r in [...msgs, ...members, project]) {
+        localBytes += utf8.encode(jsonEncode(r)).length;
+      }
+    } catch (_) {}
     if (!mounted) return;
 
     String tab = 'qr';
@@ -1302,6 +1486,16 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                   ]),
                 ),
               ),
+            );
+          }
+
+          Widget stat(String label, String value) {
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Row(children: [
+                Expanded(child: Text(label, style: TextStyle(fontSize: 11.5, color: ThemeHelper.textDim(context)))),
+                Text(value, style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: AppColors.primary)),
+              ]),
             );
           }
 
@@ -1426,6 +1620,18 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                     const SizedBox(height: 20),
                     body,
                     const SizedBox(height: 16),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(color: ThemeHelper.bg(context), borderRadius: BorderRadius.circular(12)),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        stat('Poids de l\'invitation', formatSize(utf8.encode(payload.link).length)),
+                        stat('Donn\'ees du projet en local', formatSize(localBytes)),
+                        if (_syncStats != null)
+                          stat('Dernier échange', 'envoyé ${_syncStats!.sentLabel} / reçu ${_syncStats!.receivedLabel}'),
+                      ]),
+                    ),
+                    const SizedBox(height: 12),
                     Container(
                       width: double.infinity,
                       padding: const EdgeInsets.all(12),
@@ -1637,13 +1843,17 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
 
   Widget _buildMessage(_ChatMessage msg) {
     final isBot = msg.sender.isBot;
-    final isCurrentUser = msg.sender == _currentUser;
+    final isCurrentUser = msg.fromMe;
     final msgIndex = _messages.indexOf(msg);
 
     // Find if this message is a reply to another
+    int? replyIdx = msg.replyToIndex;
+    if (replyIdx == null && msg.replyToId.isNotEmpty) {
+      replyIdx = _indexOfMessage(msg.replyToId);
+    }
     _ChatMessage? repliedMsg;
-    if (msg.replyToIndex != null && msg.replyToIndex! >= 0 && msg.replyToIndex! < _messages.length) {
-      repliedMsg = _messages[msg.replyToIndex!];
+    if (replyIdx != null && replyIdx >= 0 && replyIdx < _messages.length) {
+      repliedMsg = _messages[replyIdx];
     }
 
     return Dismissible(
@@ -1700,7 +1910,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                           onTap: () {
                             // Scroll to the original message
                             if (_scrollController.hasClients) {
-                              final targetOffset = msg.replyToIndex! * 100.0;
+                              final targetOffset = replyIdx! * 100.0;
                               _scrollController.animateTo(targetOffset.clamp(0.0, _scrollController.position.maxScrollExtent), duration: const Duration(milliseconds: 500), curve: Curves.easeInOut);
                             }
                           },
@@ -1810,12 +2020,29 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
 
   void _sendComment(String text, int replyToIndex) async {
     if (text.trim().isEmpty) return;
+    final target = (replyToIndex >= 0 && replyToIndex < _messages.length) ? _messages[replyToIndex] : null;
+    final replyToId = (target?.id?.isNotEmpty ?? false) ? target!.id! : '';
     setState(() {
-      _messages.add(_ChatMessage(sender: _currentUser!, text: text, timestamp: DateTime.now(), replyToIndex: replyToIndex));
+      _messages.add(_ChatMessage(
+        sender: _currentUser!,
+        text: text,
+        timestamp: DateTime.now(),
+        replyToIndex: replyToIndex,
+        replyToId: replyToId,
+        senderId: _myMemberId,
+        fromMe: true,
+      ));
     });
     _controller.clear();
     try {
-      await _backend.sendMessage(widget.projectId, text, sender: 'user');
+      await _backend.sendMessage(
+        widget.projectId,
+        text,
+        sender: 'user',
+        senderId: _myMemberId,
+        senderName: _currentUser?.name ?? '',
+        replyTo: replyToId,
+      );
     } catch (_) {}
     if (_scrollController.hasClients) {
       _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
@@ -2145,12 +2372,12 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
 
     setState(() {
       _showCommands = false;
-      _messages.add(_ChatMessage(sender: _currentUser!, text: command, timestamp: DateTime.now()));
+      _messages.add(_ChatMessage(sender: _currentUser!, text: command, timestamp: DateTime.now(), senderId: _myMemberId, fromMe: true));
       _isTyping = true;
     });
     _controller.clear();
     try {
-      await _backend.sendMessage(widget.projectId, command, sender: 'user');
+      await _backend.sendMessage(widget.projectId, command, sender: 'user', senderId: _myMemberId, senderName: _currentUser?.name ?? '');
     } catch (e) {
       if (!mounted) return;
       setState(() { _isTyping = false; });
@@ -2213,7 +2440,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
 
   Future<void> _botSay(String text) async {
     try {
-      await _backend.sendMessage(widget.projectId, text, sender: 'bot');
+      await _backend.sendMessage(widget.projectId, text, sender: 'bot', senderName: _members.isNotEmpty ? _members.first.name : 'Bot');
     } catch (_) {}
     if (!mounted) return;
     setState(() {
@@ -2945,7 +3172,21 @@ class _ChatMessage {
   final MessageLevel level;
   final String? alertTitle;
   final String? id;
-  _ChatMessage({required this.sender, required this.text, required this.timestamp, this.replyToIndex, this.level = MessageLevel.info, this.alertTitle, this.id});
+  final String senderId;
+  final bool fromMe;
+  final String replyToId;
+  _ChatMessage({
+    required this.sender,
+    required this.text,
+    required this.timestamp,
+    this.replyToIndex,
+    this.level = MessageLevel.info,
+    this.alertTitle,
+    this.id,
+    this.senderId = '',
+    this.fromMe = false,
+    this.replyToId = '',
+  });
 }
 
 class _SettingsItem extends StatelessWidget {

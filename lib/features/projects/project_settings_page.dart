@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:typed_data';
 import 'dart:convert';
 import 'dart:ui';
@@ -11,6 +10,9 @@ import '../../core/utils/photo_picker_helper.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../../core/local/local_backend.dart';
 import '../../core/backend/invite_payload.dart';
+import '../../core/backend/backend_adapter.dart';
+import '../../core/backend/project_sync.dart';
+import '../../core/local/user_profile.dart';
 
 class ProjectSettingsPage extends StatefulWidget {
   final String projectId;
@@ -37,6 +39,11 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
   bool _membersLoading = true;
   String _currentUserRole = 'admin';
   bool _isOldestAdmin = true;
+  bool _tablesPresent = true;
+  String? _syncError;
+  SyncStats? _syncStats;
+  int _localBytes = 0;
+  bool _syncBusy = false;
 
   static const Map<String, int> _rolePriority = {'admin': 0, 'editor': 1, 'viewer': 2, 'member': 3};
 
@@ -46,6 +53,86 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
     _tabController = TabController(length: 2, vsync: this);
     _loadProject();
     _loadMembers();
+    _loadSyncInfo();
+  }
+
+  String get _type => BackendAdapter.detect(_backendUrl, null).name;
+
+  Future<void> _loadSyncInfo({bool runSync = false}) async {
+    if (_syncBusy) return;
+    _syncBusy = true;
+    try {
+      final msgs = await _backend.getMessages(widget.projectId);
+      final members = await _backend.getMembersByProject(widget.projectId);
+      final projects = await _backend.getProjects();
+      final me = projects.where((e) => e['id'] == widget.projectId).toList();
+      int bytes = 0;
+      for (final r in [...msgs, ...members, ...me]) {
+        try { bytes += utf8.encode(jsonEncode(r)).length; } catch (_) {}
+      }
+      SyncStats stats;
+      if (runSync && _backendUrl.isNotEmpty) {
+        stats = await ProjectSync.instance.syncNow(projectId: widget.projectId, url: _backendUrl, apiKey: _apiKey, type: _type);
+      } else {
+        stats = await ProjectSync.probe(url: _backendUrl, apiKey: _apiKey, type: _type);
+      }
+      if (mounted) {
+        setState(() {
+          _localBytes = bytes;
+          _tablesPresent = stats.tablesPresent || stats.error == null;
+          _syncError = stats.error;
+          if (runSync) _syncStats = stats;
+          else _syncStats = ProjectSync.instance.lastStats;
+        });
+      }
+    } finally {
+      _syncBusy = false;
+    }
+  }
+
+  void _showSqlScript(Color surfaceColor, Color borderColor, Color textColor, Color textDimColor) {
+    final sql = ProjectSync.bootstrapSql();
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: surfaceColor,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(left: 16, right: 16, top: 16, bottom: MediaQuery.of(ctx).viewInsets.bottom + 24),
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Expanded(child: Text('Script de synchronisation', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: textColor))),
+            IconButton(icon: const Icon(Icons.close, size: 20), onPressed: () => Navigator.pop(ctx), color: textDimColor),
+          ]),
+          const SizedBox(height: 6),
+          Text('A copier/coller UNE FOIS dans la console SQL de votre backend, puis relancer la verification.',
+              style: TextStyle(fontSize: 11.5, color: textDimColor)),
+          const SizedBox(height: 12),
+          Container(
+            constraints: const BoxConstraints(maxHeight: 320),
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(12), border: Border.all(color: borderColor)),
+            child: SingleChildScrollView(
+              child: SelectableText(sql, style: const TextStyle(color: Color(0xFF55EFC4), fontSize: 11, fontFamily: 'monospace')),
+            ),
+          ),
+          const SizedBox(height: 14),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: sql));
+                ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Script SQL copie'), duration: Duration(seconds: 2)));
+              },
+              icon: const Icon(Icons.copy, size: 16, color: Colors.white),
+              label: const Text('Copier le script', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+              style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, padding: const EdgeInsets.symmetric(vertical: 13)),
+            ),
+          ),
+        ]),
+      ),
+    );
   }
 
   @override
@@ -218,12 +305,84 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
             ])),
         ], surfaceColor, borderColor, textColor),
         const SizedBox(height: 12),
+        _buildSection('Synchronisation', [_buildSyncPanel(surfaceColor, borderColor, textColor, textDimColor)], surfaceColor, borderColor, textColor),
+        const SizedBox(height: 12),
         _buildSection('Danger Zone', [
           _buildDangerButton('Supprimer le projet', AppColors.error, () => _confirmDelete(surfaceColor, borderColor, textColor, textDimColor), textColor),
         ], surfaceColor, borderColor, textColor),
         const SizedBox(height: 100),
       ],
     );
+  }
+
+  Widget _buildSyncPanel(Color surfaceColor, Color borderColor, Color textColor, Color textDimColor) {
+    final ok = _tablesPresent && _syncError == null;
+    final statusColor = ok ? const Color(0xFF00B894) : (_tablesPresent ? AppColors.warning : AppColors.error);
+    final statusText = !ok
+        ? (_syncError ?? 'Synchronisation indisponible')
+        : (_syncStats == null ? 'Tables detectees - pas encore d\'echange' : 'Synchronise');
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        Container(
+          width: 8, height: 8,
+          decoration: BoxDecoration(color: statusColor, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 8),
+        Expanded(child: Text(statusText, style: TextStyle(fontSize: 12.5, color: textColor))),
+        const SizedBox(width: 8),
+        IconButton(
+          onPressed: _syncBusy ? null : () => _loadSyncInfo(runSync: true),
+          icon: const Icon(Icons.refresh, size: 17),
+          color: textDimColor,
+          tooltip: 'Verifier maintenant',
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+        ),
+      ]),
+      const SizedBox(height: 10),
+      _buildStatLine('Donnees locales du projet', formatSize(_localBytes), textColor, textDimColor),
+      const SizedBox(height: 6),
+      _buildStatLine(
+        'Dernier echange',
+        _syncStats == null ? '-' : 'envoye ${_syncStats!.sentLabel} / recu ${_syncStats!.receivedLabel}',
+        textColor,
+        textDimColor,
+      ),
+      const SizedBox(height: 6),
+      _buildStatLine(
+        'Lignes',
+        _syncStats == null ? '-' : 'poussee ${_syncStats!.pushedRows} / tirees ${_syncStats!.pulledRows}',
+        textColor,
+        textDimColor,
+      ),
+      const SizedBox(height: 6),
+      _buildStatLine('Tables Prone (_prone_*)', _tablesPresent ? 'presentes' : 'absentes', textColor, textDimColor),
+      if (!_tablesPresent) ...[
+        const SizedBox(height: 10),
+        Text(
+          'Ces tables n\'existent pas encore dans votre backend : les messages, membres et reglages ne peuvent pas etre partages entre appareils.',
+          style: TextStyle(fontSize: 11.5, color: AppColors.error),
+        ),
+        const SizedBox(height: 10),
+        Row(children: [
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: () => _showSqlScript(surfaceColor, borderColor, textColor, textDimColor),
+              icon: const Icon(Icons.copy, size: 15),
+              label: const Text('Voir le script SQL', style: TextStyle(fontSize: 12.5)),
+              style: OutlinedButton.styleFrom(foregroundColor: textColor, side: BorderSide(color: borderColor)),
+            ),
+          ),
+        ]),
+      ],
+    ]);
+  }
+
+  Widget _buildStatLine(String label, String value, Color textColor, Color textDimColor) {
+    return Row(children: [
+      Expanded(child: Text(label, style: TextStyle(fontSize: 12, color: textDimColor))),
+      Text(value, style: TextStyle(fontSize: 12, color: textColor, fontWeight: FontWeight.w600)),
+    ]);
   }
 
   Widget _buildSection(String title, List<Widget> children, Color surfaceColor, Color borderColor, Color textColor) {
@@ -646,19 +805,13 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
     final p = projects.firstWhere((x) => x['id'] == widget.projectId, orElse: () => <String, dynamic>{});
     final orgs = await _backend.getOrganizations();
     final joinCode = await _backend.getOrCreateJoinCode(widget.projectId);
-    String inviter = '';
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final memberId = prefs.getString('member_id_${widget.projectId}') ?? '';
-      final members = await _backend.getMembersByProject(widget.projectId);
-      for (final m in members) {
-        if (memberId.isNotEmpty && (m['id'] as String?) == memberId) {
-          inviter = (m['name'] as String?) ?? '';
-          break;
-        }
-      }
-      if (inviter.isEmpty && members.isNotEmpty) inviter = (members.first['name'] as String?) ?? '';
-    } catch (_) {}
+    String inviter = await UserProfile.name();
+    if (inviter.isEmpty) {
+      try {
+        final members = await _backend.getMembersByProject(widget.projectId);
+        if (members.isNotEmpty) inviter = (members.first['name'] as String?) ?? '';
+      } catch (_) {}
+    }
     if (p.isEmpty) {
       return InvitePayload(projectId: widget.projectId, name: _projectName, description: _projectDesc, backendUrl: _backendUrl, apiKey: _apiKey, inviter: inviter, joinCode: joinCode);
     }
