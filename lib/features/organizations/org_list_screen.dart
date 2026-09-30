@@ -32,6 +32,7 @@ class _OrgListScreenState extends State<OrgListScreen> {
   Future<void> _loadOrgs() async {
     setState(() => _isLoading = true);
     final orgs = await _backend.getOrganizations();
+    if (!mounted) return;
     setState(() {
       _orgs = orgs;
       _isLoading = false;

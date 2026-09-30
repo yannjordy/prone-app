@@ -64,7 +64,21 @@ class DatabaseHelper {
 
   Future<int> insert(String table, Map<String, dynamic> data) async {
     await _ensureLoaded();
-    _getTable(table).add(Map<String, dynamic>.from(data));
+    final row = Map<String, dynamic>.from(data);
+    final id = row['id'];
+    // Cle primaire : une table ne contient jamais deux fois la meme ligne.
+    // Sans ca, un message de bienvenue ou un membre arrive deux fois par des
+    // chemins differents reste duplique a vie.
+    if (id != null && id.toString().isNotEmpty) {
+      final rows = _getTable(table);
+      final i = rows.indexWhere((r) => '${r['id']}' == '$id');
+      if (i >= 0) {
+        rows[i] = row;
+        await _persistTable(table);
+        return 1;
+      }
+    }
+    _getTable(table).add(row);
     await _persistTable(table);
     return 1;
   }

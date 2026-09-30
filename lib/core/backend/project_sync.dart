@@ -45,6 +45,7 @@ class ProjectSync {
   static const String membersTable = '_prone_members';
   static const String messagesTable = '_prone_messages';
   static const String projectsTable = '_prone_projects';
+  static const String tombstonesTable = '_prone_tombstones';
 
   final _db = DatabaseHelper();
 
@@ -53,6 +54,18 @@ class ProjectSync {
   bool _pending = false;
   SyncStats? lastStats;
   void Function(SyncStats stats)? onSynced;
+
+  /// Flux broadcast des cycles utiles : chaque ecran (chat, reglages,
+  /// membres) peut s'abonner pour se rafraichir, sans voler le callback
+  /// unique [onSynced] a l'ecran de chat.
+  final _events = StreamController<SyncStats>.broadcast();
+  Stream<SyncStats> get stream => _events.stream;
+
+  void _notify(SyncStats stats) {
+    if (!_events.isClosed) _events.add(stats);
+    final cb = onSynced;
+    if (cb != null) cb(stats);
+  }
 
   static String bootstrapSql() => '''
 -- Prone : synchronisation de projet (a executer une seule fois)
@@ -81,6 +94,14 @@ create table if not exists public.$membersTable (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.$tombstonesTable (
+  id text primary key,
+  project_id text not null,
+  kind text not null default 'message',
+  deleted_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists public.$projectsTable (
   project_id text primary key,
   name text not null default '',
@@ -93,18 +114,30 @@ create table if not exists public.$projectsTable (
 
 create index if not exists _prone_messages_project_idx on public.$messagesTable (project_id, created_at);
 create index if not exists _prone_members_project_idx on public.$membersTable (project_id);
+create index if not exists _prone_tombstones_project_idx on public.$tombstonesTable (project_id);
 
 alter table public.$messagesTable enable row level security;
 alter table public.$membersTable enable row level security;
 alter table public.$projectsTable enable row level security;
+alter table public.$tombstonesTable enable row level security;
 
 drop policy if exists prone_sync_messages on public.$messagesTable;
 drop policy if exists prone_sync_members on public.$membersTable;
 drop policy if exists prone_sync_projects on public.$projectsTable;
+drop policy if exists prone_sync_tombstones on public.$tombstonesTable;
 
 create policy prone_sync_messages on public.$messagesTable for all using (true) with check (true);
 create policy prone_sync_members on public.$membersTable for all using (true) with check (true);
 create policy prone_sync_projects on public.$projectsTable for all using (true) with check (true);
+create policy prone_sync_tombstones on public.$tombstonesTable for all using (true) with check (true);
+
+-- Supabase Realtime ne diffuse les changements que pour les tables
+-- declarees dans la publication `supabase_realtime`. Sans ces lignes, les
+-- messages et les membres n'arrivent qu'au tour de polling suivant (4 s).
+do 'begin alter publication supabase_realtime add table public.$messagesTable; exception when duplicate_object or undefined_object then null; end';
+do 'begin alter publication supabase_realtime add table public.$membersTable; exception when duplicate_object or undefined_object then null; end';
+do 'begin alter publication supabase_realtime add table public.$projectsTable; exception when duplicate_object or undefined_object then null; end';
+do 'begin alter publication supabase_realtime add table public.$tombstonesTable; exception when duplicate_object or undefined_object then null; end';
 ''';
 
   static String? _normTime(Object? v) {
@@ -124,6 +157,15 @@ create policy prone_sync_projects on public.$projectsTable for all using (true) 
   }
 
   static String _str(Object? v) => v == null ? '' : v.toString();
+
+  /// Vrai si l'erreur signale juste qu'une table non exposee n'existe pas :
+  /// les tombstones sont un ajout recent, un backend boote avec l'ancien
+  /// script ne doit pas voir toute sa synchro tomber a cause d'eux.
+  static bool _missingTable(String? error) {
+    if (error == null || error.isEmpty) return false;
+    final e = error.toLowerCase();
+    return e.contains('introuvable') || e.contains('404') || e.contains('not found') || e.contains('pgrst205') || e.contains('42p01');
+  }
 
   int _bytesOf(Map<String, dynamic> row) => utf8.encode(jsonEncode(row)).length;
 
@@ -207,8 +249,11 @@ create policy prone_sync_projects on public.$projectsTable for all using (true) 
     _busy = true;
     try {
       await _push(projectId, url, apiKey, type, stats);
-      if (stats.error == null) await _pull(projectId, url, apiKey, type, stats);
+      await _pull(projectId, url, apiKey, type, stats);
       lastStats = stats;
+      if (stats.pushedRows > 0 || stats.pulledRows > 0 || stats.error != null) {
+        _notify(stats);
+      }
       return stats;
     } finally {
       _busy = false;
@@ -246,7 +291,8 @@ create policy prone_sync_projects on public.$projectsTable for all using (true) 
       final res = await _upsert(url, key, messagesTable, values, idColumn: 'id', idValue: values['id'] as String, type: type);
       if (!res.ok) {
         stats.error = res.error;
-        return;
+        if (res.offline) return; // reseau : inutile d'essayer les autres lignes
+        continue; // ligne empoisonnee : les autres doivent quand meme partir
       }
       stats.pushedRows++;
       stats.bytesSent += _bytesOf(values);
@@ -272,11 +318,42 @@ create policy prone_sync_projects on public.$projectsTable for all using (true) 
       final res = await _upsert(url, key, membersTable, values, idColumn: 'id', idValue: id, type: type);
       if (!res.ok) {
         stats.error = res.error;
-        return;
+        if (res.offline) return;
+        continue;
       }
       stats.pushedRows++;
       stats.bytesSent += _bytesOf(values);
       await _db.update('members', {'sync_state': 'synced'}, where: 'id = ?', whereArgs: [id]);
+    }
+
+    // --- suppressions (tombstones) ---
+    // Une simple suppression locale reviendrait au prochain cycle : la
+    // ligne existe encore chez les autres appareils. On diffuse donc la
+    // suppression, puis on efface la ligne distante (meme si la table des
+    // tombstones n'existe pas encore sur ce backend).
+    final tombs = await _db.query('tombstones', where: 'project_id = ?', whereArgs: [projectId]);
+    for (final t in tombs) {
+      final id = _str(t['id']);
+      if (id.isEmpty) continue;
+      final kind = _str(t['kind']);
+      final values = <String, dynamic>{
+        'id': id,
+        'project_id': projectId,
+        'kind': kind.isEmpty ? 'message' : kind,
+        'deleted_at': _normTime(t['deleted_at']) ?? DateTime.now().toUtc().toIso8601String(),
+        'updated_at': _normTime(t['updated_at']) ?? DateTime.now().toUtc().toIso8601String(),
+      };
+      final res = await _upsert(url, key, tombstonesTable, values, idColumn: 'id', idValue: id, type: type);
+      if (res.ok) {
+        stats.pushedRows++;
+        stats.bytesSent += _bytesOf(values);
+      } else if (!_missingTable(res.error)) {
+        stats.error = res.error;
+        return;
+      }
+      final remoteTable = kind == 'member' ? membersTable : messagesTable;
+      await BackendAdapter.deleteRow(url, key, remoteTable, idColumn: 'id', idValue: id, type: type);
+      await _db.delete('tombstones', where: 'id = ?', whereArgs: [id]);
     }
 
     // --- reglages projet ---
@@ -296,7 +373,7 @@ create policy prone_sync_projects on public.$projectsTable for all using (true) 
         final res = await _upsert(url, key, projectsTable, values, idColumn: 'project_id', idValue: projectId, type: type);
         if (!res.ok) {
           stats.error = res.error;
-          return;
+          if (res.offline) return;
         }
         stats.pushedRows++;
         stats.bytesSent += _bytesOf(values);
@@ -321,6 +398,7 @@ create policy prone_sync_projects on public.$projectsTable for all using (true) 
       type: type,
       searchField: 'project_id',
       searchValue: projectId,
+      orderBy: 'created_at',
     );
     if (!remoteMsgs.ok) {
       stats.error = remoteMsgs.error;
@@ -329,12 +407,52 @@ create policy prone_sync_projects on public.$projectsTable for all using (true) 
     }
     stats.tablesPresent = true;
 
+    // --- suppressions (best effort) ---
+    // Les tombstones viennent en tete : une ligne supprimee par un autre
+    // membre ne doit pas etre re-injectee par la suite.
+    final tombIds = <String>{};
+    try {
+      final remoteTombs = await BackendAdapter.fetchRows(
+        url,
+        key,
+        tombstonesTable,
+        limit: 500,
+        type: type,
+        searchField: 'project_id',
+        searchValue: projectId,
+      );
+      if (remoteTombs.ok) {
+        for (final r in remoteTombs.rows) {
+          final id = _str(r['id']);
+          if (id.isNotEmpty) tombIds.add(id);
+        }
+      }
+    } catch (_) {
+      // Table absente ou reseau : on continue avec les autres tables.
+    }
+    final localTombs = await _db.query('tombstones', where: 'project_id = ?', whereArgs: [projectId]);
+    for (final t in localTombs) {
+      final id = _str(t['id']);
+      if (id.isNotEmpty) tombIds.add(id);
+    }
+    if (tombIds.isNotEmpty) {
+      var removed = 0;
+      for (final id in tombIds) {
+        removed += await _db.delete('messages', where: 'id = ?', whereArgs: [id]);
+        removed += await _db.delete('members', where: 'id = ?', whereArgs: [id]);
+      }
+      if (removed > 0) {
+        stats.pulledRows += removed;
+        stats.bytesReceived += removed * 40;
+      }
+    }
+
     final localMsgs = await _db.query('messages', where: 'project_id = ?', whereArgs: [projectId]);
     final byId = <String, Map<String, dynamic>>{for (final m in localMsgs) _str(m['id']): m};
 
     for (final r in remoteMsgs.rows) {
       final id = _str(r['id']);
-      if (id.isEmpty) continue;
+      if (id.isEmpty || tombIds.contains(id)) continue;
       final bytes = _bytesOf(r);
       final local = byId[id];
       if (local != null && local['sync_state'] == 'dirty') continue; // local gagne
@@ -383,10 +501,20 @@ create policy prone_sync_projects on public.$projectsTable for all using (true) 
 
     for (final r in remoteMembers.rows) {
       final id = _str(r['id']);
-      if (id.isEmpty) continue;
+      if (id.isEmpty || tombIds.contains(id)) continue;
       final bytes = _bytesOf(r);
       final local = membersById[id];
       if (local != null && local['sync_state'] == 'dirty') continue;
+
+      final remoteEmail = _str(r['email']).trim().toLowerCase();
+      if (remoteEmail.isNotEmpty &&
+          localMembers.any((m) =>
+              _str(m['id']) != id &&
+              _str(m['email']).trim().toLowerCase() == remoteEmail)) {
+        // Meme personne deja presente sous un autre identifiant : on n'ajoute
+        // pas une deuxieme fiche (doublon visible dans la liste des membres).
+        continue;
+      }
 
       final row = <String, dynamic>{
         'id': id,
@@ -455,9 +583,12 @@ create policy prone_sync_projects on public.$projectsTable for all using (true) 
     Duration interval = const Duration(seconds: 4),
   }) {
     if (url.trim().isEmpty) return;
-    if (_timer != null && _pollingFor == projectId) return;
+    // La cle inclut l'URL et la cle API : sinon un changement
+    // d'environnement laissait le timer pousser vers l'ancien backend.
+    final key = '$projectId|${url.trim()}|$apiKey';
+    if (_timer != null && _pollingFor == key) return;
     stopPolling();
-    _pollingFor = projectId;
+    _pollingFor = key;
 
     // Supabase : socket temps reel en plus du polling de securite.
     if (BackendAdapter.detect(url, type) == BackendType.supabase) {
@@ -465,19 +596,10 @@ create policy prone_sync_projects on public.$projectsTable for all using (true) 
         url: url,
         apiKey: apiKey,
         projectId: projectId,
-        onChange: () async {
-          final s = await syncNow(projectId: projectId, url: url, apiKey: apiKey, type: type);
-          if (s.pushedRows > 0 || s.pulledRows > 0 || s.error != null) onSynced?.call(s);
-        },
+        onChange: () => syncNow(projectId: projectId, url: url, apiKey: apiKey, type: type),
       );
     }
-    _timer = Timer.periodic(interval, (_) async {
-      final stats = await syncNow(projectId: projectId, url: url, apiKey: apiKey, type: type);
-      final cb = onSynced;
-      if (cb != null && (stats.pushedRows > 0 || stats.pulledRows > 0 || stats.error != null)) {
-        cb(stats);
-      }
-    });
+    _timer = Timer.periodic(interval, (_) => syncNow(projectId: projectId, url: url, apiKey: apiKey, type: type));
   }
 
   String? _pollingFor;

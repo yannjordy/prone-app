@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -47,6 +49,8 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
   SyncStats? _syncStats;
   int _localBytes = 0;
   bool _syncBusy = false;
+  String _myMemberId = '';
+  StreamSubscription<SyncStats>? _syncSub;
 
   static const Map<String, int> _rolePriority = {'admin': 0, 'editor': 1, 'viewer': 2, 'member': 3};
 
@@ -57,6 +61,13 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
     _loadProject();
     _loadMembers();
     _loadSyncInfo();
+    // Chaque cycle de synchro (realtime ou polling) peut avoir recu un
+    // nouveau membre ou un changement de grade : on recharge la liste.
+    _syncSub = ProjectSync.instance.stream.listen((stats) {
+      if (!mounted) return;
+      _loadMembers();
+      if (stats.pulledRows > 0) _loadProject();
+    });
   }
 
   String get _type => BackendAdapter.detect(_backendUrl, null).name;
@@ -140,6 +151,7 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
 
   @override
   void dispose() {
+    _syncSub?.cancel();
     _tabController.dispose();
     _nameController.dispose();
     _descController.dispose();
@@ -216,6 +228,7 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
 
     if (mounted) setState(() {
       _members = members;
+      _myMemberId = (me['id'] as String?) ?? myId;
       _currentUserRole = (me['role'] as String?) ?? 'viewer';
       _isOldestAdmin = _currentUserRole == 'admin';
       _membersLoading = false;
@@ -310,6 +323,7 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
 
   Future<void> _saveProject() async {
     await _backend.updateProject(widget.projectId, {'name': _nameController.text, 'description': _descController.text});
+    if (!mounted) return;
     setState(() { _projectName = _nameController.text; _projectDesc = _descController.text; });
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Parametres sauvegardes'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
@@ -471,6 +485,7 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
       if (bytes != null) {
         final base64Photo = base64Encode(bytes);
         await _backend.updateProject(widget.projectId, {'photo': base64Photo});
+        if (!mounted) return;
         setState(() => _projectImageBytes = Uint8List.fromList(bytes));
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Photo mise a jour'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
@@ -819,7 +834,10 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
                         final email = emailCtrl.text.trim();
                         final name = email.split('@')[0];
                         final orgs = await _backend.getOrganizations();
-                        if (orgs.isNotEmpty) await _backend.addMember((orgs.first['id'] as String?) ?? '', name, email, selectedRole, projectId: widget.projectId);
+                        final orgId = orgs.isNotEmpty ? ((orgs.first['id'] as String?) ?? '') : '';
+                        // Toujours ajouter : l'absence d'organisation ne doit
+                        // pas rendre l'ajout silencieusement inactif.
+                        await _backend.addMember(orgId, name, email, selectedRole, projectId: widget.projectId);
                         Navigator.pop(ctx);
                         _loadMembers();
                         if (!mounted) return;
@@ -1052,7 +1070,8 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
                 Expanded(child: GestureDetector(onTap: () async {
                   Navigator.pop(ctx);
                   final orgs = await _backend.getOrganizations();
-                  if (orgs.isNotEmpty) await _backend.removeMember((orgs.first['id'] as String?) ?? '', memberId);
+                  final orgId = orgs.isNotEmpty ? ((orgs.first['id'] as String?) ?? '') : '';
+                  await _backend.removeMember(orgId, memberId);
                   _loadMembers();
                 }, child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(color: AppColors.error, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Retirer', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))))),
               ]),
@@ -1069,8 +1088,10 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
     final memberId = (member['id'] as String?) ?? '';
     final role = (member['role'] as String?) ?? 'member';
     final createdAt = (member['created_at'] as String?) ?? '';
-    final isOldestAdmin = role == 'admin' && _members.where((m2) => (m2['role'] as String?) == 'admin').every((m2) => (((m2['created_at'] as String?) ?? '').compareTo(createdAt) <= 0));
+    // "le plus ancien" = tous les autres admins sont plus recents que moi.
+    final isOldestAdmin = role == 'admin' && _members.where((m2) => (m2['role'] as String?) == 'admin').every((m2) => (((m2['created_at'] as String?) ?? '').compareTo(createdAt) >= 0));
     final isLastAdmin = role == 'admin' && _members.where((m2) => (m2['role'] as String?) == 'admin').length <= 1;
+    final isSelf = _myMemberId.isNotEmpty && memberId == _myMemberId;
 
     showGeneralDialog(
       context: context,
@@ -1097,7 +1118,7 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
                 Navigator.pop(ctx);
                 _showMemberProfile(member, surfaceColor, borderColor, textColor, textDimColor);
               }),
-              if (_currentUserRole == 'admin' && !isOldestAdmin) ...[
+              if (_currentUserRole == 'admin' && !isLastAdmin) ...[
                 const SizedBox(height: 8),
                 _buildMemberOption('Changer le grade', 'edit.svg', const Color(0xFF00CEC9), () {
                   Navigator.pop(ctx);
@@ -1108,7 +1129,7 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
                 const SizedBox(height: 8),
                 _buildMemberOption('Grade', 'lock.svg', AppColors.warning, () => Navigator.pop(ctx)),
               ],
-              if (!isOldestAdmin && !isLastAdmin) ...[
+              if (!isOldestAdmin && !isLastAdmin && !isSelf) ...[
                 const SizedBox(height: 8),
                 _buildMemberOption('Retirer', 'trash.svg', AppColors.error, () {
                   Navigator.pop(ctx);
@@ -1258,16 +1279,10 @@ class _ProjectSettingsPageState extends State<ProjectSettingsPage> with SingleTi
           }
           return;
         }
-        final orgs = await _backend.getOrganizations();
-        if (orgs.isNotEmpty) {
-          final orgId = orgs.first['id'] as String;
-          final members = await _backend.getMembersByProject(widget.projectId);
-          final m = members.firstWhere((x) => x['id'] == memberId, orElse: () => <String, dynamic>{});
-          if (m.isNotEmpty) {
-            await _backend.removeMember(orgId, memberId);
-            await _backend.addMember(orgId, (m['name'] as String?) ?? '', (m['email'] as String?) ?? '', role, projectId: widget.projectId);
-          }
-        }
+        // Mise a jour in place : removeMember + addMember creait un
+        // nouvel UUID (casser member_id_<projet>) et laissait l'ancienne
+        // ligne distante revenir au suivant -> doublon fantome.
+        await _backend.updateMember(memberId, {'role': role});
         _loadMembers();
         if (mounted) Navigator.pop(ctx);
       },

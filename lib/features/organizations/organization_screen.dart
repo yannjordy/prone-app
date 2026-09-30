@@ -90,6 +90,7 @@ class _OrganizationScreenState extends State<OrganizationScreen> {
     final org = await _backend.getOrganization(widget.orgId);
     final members = await _backend.getMembers(widget.orgId);
     final projects = await _backend.getProjectsByOrganization(widget.orgId);
+    if (!mounted) return;
     setState(() {
       _org = org;
       _members = members;

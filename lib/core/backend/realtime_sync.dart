@@ -21,9 +21,13 @@ class SupabaseRealtime {
     '_prone_messages',
     '_prone_members',
     '_prone_projects',
+    '_prone_tombstones',
   ];
 
   WebSocketChannel? _channel;
+  String? _lastWs;
+  int _retries = 0;
+  Timer? _reconnect;
   StreamSubscription<dynamic>? _sub;
   Timer? _heartbeat;
   Timer? _debounce;
@@ -71,10 +75,16 @@ class SupabaseRealtime {
     if (ws == null) return; // backend non Supabase : on reste en polling
     _attachedKey = key;
     _onChange = onChange;
+    _retries = 0;
+    _lastWs = ws;
     _connect(ws);
   }
 
   void detach() {
+    _reconnect?.cancel();
+    _reconnect = null;
+    _lastWs = null;
+    _retries = 0;
     _heartbeat?.cancel();
     _heartbeat = null;
     _debounce?.cancel();
@@ -99,8 +109,8 @@ class SupabaseRealtime {
       _joined = false;
       _sub = channel.stream.listen(
         _onMessage,
-        onError: (_) => _joined = false,
-        onDone: () => _joined = false,
+        onError: (_) { _joined = false; _scheduleReconnect(); },
+        onDone: () { _joined = false; _scheduleReconnect(); },
         cancelOnError: false,
       );
       _join();
@@ -162,6 +172,21 @@ class SupabaseRealtime {
     if (event == 'postgres_changes') {
       _notify();
     }
+  }
+
+  /// Une socket fermee (app en arriere-plan, coupure reseau) devait etre
+  /// reouverte a la main : le temps reel mourait silencieusement et il ne
+  /// restait que le polling de 4 s.
+  void _scheduleReconnect() {
+    if (_lastWs == null || _attachedKey == null) return;
+    if (_reconnect?.isActive ?? false) return;
+    _retries = (_retries + 1).clamp(1, 8);
+    _reconnect = Timer(Duration(seconds: _retries * 2), () {
+      if (_attachedKey == null || _lastWs == null) return;
+      final ws = _lastWs!;
+      _reconnect = null;
+      _connect(ws);
+    });
   }
 
   /// Debounce : un import qui pousse 50 lignes ne doit pas lancer 50 syncs.

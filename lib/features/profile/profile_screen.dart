@@ -46,6 +46,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _loadProfile() async {
     await PushNotificationService.initialize();
     final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
     setState(() {
       _userName = prefs.getString('profile_name') ?? '';
       _userEmail = prefs.getString('profile_email') ?? '';
@@ -173,6 +174,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   final XFile? image = await picker.pickImage(source: ImageSource.camera, imageQuality: 80);
                   if (image != null) {
                     final bytes = await image.readAsBytes();
+                    if (!mounted) return;
                     setState(() => _profileImageBytes = bytes);
                     await _saveProfile();
                     if (!mounted) return;
@@ -190,6 +192,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   final XFile? image = await picker.pickImage(source: ImageSource.gallery, imageQuality: 80);
                   if (image != null) {
                     final bytes = await image.readAsBytes();
+                    if (!mounted) return;
                     setState(() => _profileImageBytes = bytes);
                     await _saveProfile();
                     if (!mounted) return;

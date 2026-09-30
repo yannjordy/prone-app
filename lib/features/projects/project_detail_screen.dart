@@ -13,6 +13,7 @@ import '../../app/app.dart';
 import '../../core/commands/command_library.dart';
 import '../../core/security/bot_protector.dart';
 import '../../core/backend/backend_adapter.dart';
+import '../../core/backend/environments.dart';
 import '../../core/backend/invite_payload.dart';
 import '../../core/backend/project_sync.dart';
 import '../../core/local/local_backend.dart';
@@ -30,7 +31,7 @@ class ProjectDetailScreen extends StatefulWidget {
   State<ProjectDetailScreen> createState() => _ProjectDetailScreenState();
 }
 
-class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
+class _ProjectDetailScreenState extends State<ProjectDetailScreen> with WidgetsBindingObserver {
   final _controller = TextEditingController();
   final _commandSearchController = TextEditingController();
   final _scrollController = ScrollController();
@@ -40,7 +41,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   bool _showAllCommands = false;
   bool _showSettings = false;
   bool _isTyping = false;
-  bool _isAdmin = true;
+  bool _isAdmin = false;
   int? _selectedMessageIndex;
   String _selectedCategory = 'All';
   final _backend = LocalBackend();
@@ -58,7 +59,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   String _backendUrl = '';
   String _backendType = 'generic';
   Uint8List? _projectImageBytes;
-  String _userRole = 'admin';
+  String _userRole = '';
   bool _isMentioning = false;
 
   final List<_Member> _members = [
@@ -69,11 +70,15 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
 
   String _myMemberId = '';
   bool _refreshing = false;
+  bool _reloadPending = false;
+  bool _syncErrorShown = false;
+  String? _syncWarning;
   SyncStats? _syncStats;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _currentUser = _Member(name: 'Vous', initials: 'VO', color: AppColors.primary, isOnline: true);
     ProjectSync.instance.onSynced = _onSynced;
     _controller.addListener(() {
@@ -88,14 +93,61 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     _refreshPendingCount();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Retour dans l'app : on rattrape tout ce qui s'est passe en arriere-plan
+    // sans attendre le prochain tour de polling.
+    if (state != AppLifecycleState.resumed) return;
+    if (_backendUrl.isEmpty) return;
+    ProjectSync.instance.syncNow(
+      projectId: widget.projectId,
+      url: _backendUrl,
+      apiKey: _projectApiKey,
+      type: _backendType,
+    );
+  }
+
   void _onSynced(SyncStats stats) {
     if (!mounted) return;
     _syncStats = stats;
-    if (stats.pulledRows > 0 && !_refreshing) {
-      _loadProjectData();
-    } else {
-      setState(() {});
+    if (stats.error != null) _reportSyncError('${stats.error}');
+    if (stats.pulledRows > 0) {
+      if (_refreshing) {
+        // Un rechargement est en cours : il a lu des donnees d'avant cette
+        // synchro, on le rejoue juste apres pour ne rien rater.
+        _reloadPending = true;
+      } else {
+        _loadProjectData();
+      }
+      return;
     }
+    setState(() {});
+  }
+
+  /// Explique une erreur de synchro UNE fois dans le chat (plutot que de
+  /// laisser croire que les messages sont partages alors qu'ils ne le sont pas).
+  void _reportSyncError(String error) {
+    if (_syncErrorShown) return;
+    _syncErrorShown = true;
+    final missingTables = error.contains('_prone') || error.contains('Table introuvable') || error.contains('/tables');
+    final text = missingTables
+        ? '⚠️ Synchronisation inactive\n\n'
+            'Les tables _prone_* n\'existent pas encore sur ce backend : messages et membres restent locaux.\n\n'
+            'Ouvrez Réglages → Synchronisation → « Voir le script SQL », copiez-le et exécutez-le une seule fois dans la console SQL du backend (Supabase → SQL Editor).\n\n'
+            'Ensuite tout se partage automatiquement.'
+        : '⚠️ Synchronisation en erreur\n\n$error';
+    if (mounted) {
+      setState(() {
+        _syncWarning = text;
+        _messages.add(_ChatMessage(sender: _members.first, text: text, timestamp: DateTime.now(), level: MessageLevel.warning));
+      });
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+      }
+    }
+    BackendErrorStore.instance
+        .record(widget.projectId, text.split('\n\n').first, command: '/sync', level: ErrorLevel.warning)
+        .then((_) => _refreshAlertCount());
   }
 
   Future<void> _refreshAlertCount() async {
@@ -106,6 +158,122 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   Future<void> _refreshPendingCount() async {
     final items = await OfflineQueue.instance.pending(widget.projectId);
     if (mounted) setState(() => _pendingCommands = items.length);
+  }
+
+  String get _envLabel {
+    final n = _envName.isEmpty ? 'Non défini' : _envName;
+    return n.length > 9 ? '${n.substring(0, 9)}…' : n;
+  }
+
+  void _showEnvironmentSheet() {
+    final surfaceColor = ThemeHelper.surface(context);
+    final borderColor = ThemeHelper.borderLight(context);
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) => ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+          child: Container(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.72),
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(color: surfaceColor.withOpacity(0.97), border: Border(top: BorderSide(color: borderColor))),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: borderColor, borderRadius: BorderRadius.circular(2)))),
+              const SizedBox(height: 18),
+              Row(children: [
+                SvgPicture.asset('assets/icons/globe.svg', width: 18, height: 18,
+                  colorFilter: ColorFilter.mode(_envIsProd ? AppColors.warning : ThemeHelper.text(context), BlendMode.srcIn)),
+                const SizedBox(width: 10),
+                Text('Environnements', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: ThemeHelper.text(context))),
+              ]),
+              const SizedBox(height: 6),
+              Text('La bascule change l\'URL et la clé API utilisées par toutes les commandes.',
+                style: TextStyle(fontSize: 12, color: ThemeHelper.textDim(context))),
+              const SizedBox(height: 14),
+              Flexible(child: _buildEnvironmentList(ctx)),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEnvironmentList(BuildContext ctx) {
+    return FutureBuilder<List<EnvironmentInfo>>(
+      future: _environments(),
+      builder: (context, snap) {
+        final envs = snap.data ?? const <EnvironmentInfo>[];
+        if (envs.isEmpty) {
+          return Padding(
+            padding: const EdgeInsets.symmetric(vertical: 24),
+            child: Center(
+              child: Column(children: [
+                SvgPicture.asset('assets/icons/globe.svg', width: 36, height: 36, colorFilter: ColorFilter.mode(ThemeHelper.textDim(context), BlendMode.srcIn)),
+                const SizedBox(height: 12),
+                Text('Aucun environnement enregistré', style: TextStyle(fontSize: 14, color: ThemeHelper.textDim(context))),
+                const SizedBox(height: 6),
+                Text('Ajoutez une connexion depuis le projet.', style: TextStyle(fontSize: 12, color: ThemeHelper.textDim(context))),
+              ]),
+            ),
+          );
+        }
+        final current = Environments.active(envs, _backendUrl);
+        return ListView.separated(
+          shrinkWrap: true,
+          itemCount: envs.length,
+          separatorBuilder: (_, __) => const SizedBox(height: 8),
+          itemBuilder: (context, i) {
+            final e = envs[i];
+            final isActive = current != null && current.id == e.id;
+            final color = e.isProduction ? AppColors.warning : AppColors.success;
+            return GestureDetector(
+              onTap: () async {
+                if (isActive) return;
+                final msg = await _switchEnvironment(e.name);
+                if (ctx.mounted) Navigator.pop(ctx);
+                await _botSay(msg);
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: isActive ? color : ThemeHelper.borderLight(context)),
+                  color: isActive ? color.withOpacity(0.10) : Colors.transparent,
+                ),
+                child: Row(children: [
+                  Container(
+                    width: 10, height: 10,
+                    decoration: BoxDecoration(color: color, shape: BoxShape.circle,
+                      boxShadow: [BoxShadow(color: color.withOpacity(0.5), blurRadius: 6)]),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Row(children: [
+                        Flexible(child: Text(e.name, maxLines: 1, overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: ThemeHelper.text(context)))),
+                        if (e.isProduction) ...[
+                          const SizedBox(width: 6),
+                          Text('PROD', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.warning)),
+                        ],
+                      ]),
+                      const SizedBox(height: 2),
+                      Text(e.url, maxLines: 1, overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 11, color: ThemeHelper.textDim(context))),
+                    ]),
+                  ),
+                  if (isActive)
+                    SvgPicture.asset('assets/icons/check-circle.svg', width: 17, height: 17, colorFilter: ColorFilter.mode(color, BlendMode.srcIn)),
+                ]),
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   void _showAlertsSheet() {
@@ -221,8 +389,12 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   }
 
   Future<void> _loadProjectData() async {
-    if (_refreshing) return;
+    if (_refreshing) {
+      _reloadPending = true;
+      return;
+    }
     _refreshing = true;
+    try {
     final memberById = <String, _Member>{};
     final memberByName = <String, _Member>{};
     final projects = await _backend.getProjects();
@@ -239,6 +411,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
           imageBytes = base64Decode(photo);
         }
       } catch (_) {}
+      if (!mounted) return;
       setState(() {
         _projectName = name;
         _projectInitials = name.split(' ').where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join().toUpperCase();
@@ -248,6 +421,8 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         _backendType = BackendAdapter.detect(_backendUrl, null).name;
         _projectImageBytes = imageBytes;
       });
+      _envName = await _environmentName();
+      if (mounted) setState(() {});
     }
     final members = await _backend.getMembersByProject(widget.projectId);
     members.sort((a, b) {
@@ -290,6 +465,9 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         final prefs = await SharedPreferences.getInstance();
         myMemberId = prefs.getString('member_id_${widget.projectId}') ?? '';
       } catch (_) {}
+      final profile = await UserProfile.load();
+      final pEmail = (profile['email'] ?? '').trim().toLowerCase();
+      final pName = (profile['name'] ?? '').trim().toLowerCase();
       Map<String, dynamic>? me;
       for (final m in members) {
         if (myMemberId.isNotEmpty && (m['id'] as String?) == myMemberId) {
@@ -297,18 +475,38 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
           break;
         }
       }
-      me ??= members.isNotEmpty ? members.first : null;
+      if (me == null && pEmail.isNotEmpty) {
+        for (final m in members) {
+          if (((m['email'] as String?) ?? '').trim().toLowerCase() == pEmail) {
+            me = m;
+            break;
+          }
+        }
+      }
+      if (me == null && pName.isNotEmpty) {
+        for (final m in members) {
+          if (((m['name'] as String?) ?? '').trim().toLowerCase() == pName) {
+            me = m;
+            break;
+          }
+        }
+      }
+      // Vrai uniquement si la fiche nous appartient (id, email ou nom) :
+      // le repli "seul membre" ne doit JAMAIS recevoir notre profil.
+      var meIdentified = me != null;
+      if (me == null && members.length == 1) me = members.first;
+      // Surtout pas members.first au hasard : la liste est triee admin en
+      // premier, un simple membre aurait recu les droits d'ecriture.
       _myMemberId = (me != null ? (me['id'] as String?) : null) ?? myMemberId;
-      if (me != null) {
-        // Le profil est la source unique : on repousse nom/email/photo
-        // sur la fiche membre locale de ce projet.
-        final profile = await UserProfile.load();
-        final pName = profile['name']!.trim();
-        final pEmail = profile['email']!.trim();
-        final pPhoto = profile['photo']!;
+      if (me != null && meIdentified) {
+        // Le profil est la source unique : on repouve nom/email/photo
+        // sur notre propre fiche membre de ce projet.
+        final pNameRaw = (profile['name'] ?? '').trim();
+        final pEmailRaw = (profile['email'] ?? '').trim();
+        final pPhoto = (profile['photo'] ?? '');
         final updates = <String, dynamic>{};
-        if (pName.isNotEmpty && ((me['name'] as String?) ?? '') != pName) updates['name'] = pName;
-        if (pEmail.isNotEmpty && ((me['email'] as String?) ?? '') != pEmail) updates['email'] = pEmail;
+        if (pNameRaw.isNotEmpty && ((me['name'] as String?) ?? '') != pNameRaw) updates['name'] = pNameRaw;
+        if (pEmailRaw.isNotEmpty && ((me['email'] as String?) ?? '') != pEmailRaw) updates['email'] = pEmailRaw;
         if (pPhoto.isNotEmpty && ((me['photo'] as String?) ?? '') != pPhoto) updates['photo'] = pPhoto;
         if (updates.isNotEmpty && ((me['id'] as String?) ?? '').isNotEmpty) {
           await _backend.updateMember((me['id'] as String?) ?? '', updates);
@@ -322,26 +520,28 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
           initials: myName.split(' ').where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join().toUpperCase(),
           color: AppColors.primary,
           isOnline: true,
-          role: (me['role'] as String?) ?? 'admin',
+          role: (me['role'] as String?) ?? '',
           email: (me['email'] as String?) ?? '',
         );
       }
+      final resolvedRole = await _backend.resolveRole(widget.projectId);
       setState(() {
         _members.clear();
         _members.addAll(memberList);
-        _userRole = (me != null ? (me['role'] as String?) : null) ?? 'admin';
-        _isAdmin = _userRole == 'admin';
+        _userRole = resolvedRole;
+        _isAdmin = resolvedRole == 'admin';
       });
     }
     var msgs = await _backend.getMessages(widget.projectId);
-    if (msgs.isEmpty) {
+    final welcomeId = 'welcome_${widget.projectId}';
+    if (msgs.isEmpty && !(await _backend.isTombstoned(widget.projectId, welcomeId))) {
       final botName = await _getBotName();
       await _backend.sendMessage(
         widget.projectId,
         'Bienvenue sur $_projectName !\n\nTapez /help pour voir les commandes disponibles.',
         sender: 'bot',
         senderName: botName,
-        explicitId: 'welcome_${widget.projectId}',
+        explicitId: welcomeId,
       );
       msgs = await _backend.getMessages(widget.projectId);
     }
@@ -383,14 +583,19 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
           replyToId: (m['reply_to'] as String?) ?? '',
         ));
       }
+      if (_messages.isEmpty) {
+        _messages.add(_ChatMessage(
+          sender: botMember,
+          text: 'Bienvenue sur $_projectName !\n\nTapez /help pour voir les commandes disponibles.',
+          timestamp: DateTime.now(),
+        ));
+      }
+      if (_syncWarning != null && _syncWarning!.isNotEmpty) {
+        _messages.add(_ChatMessage(sender: botMember, text: _syncWarning!, timestamp: DateTime.now(), level: MessageLevel.warning));
+      }
     });
-    if (_messages.isEmpty) {
-      _messages.add(_ChatMessage(
-        sender: _members.first,
-        text: 'Bienvenue sur $_projectName !\n\nTapez /help pour voir les commandes disponibles.',
-        timestamp: DateTime.now(),
-      ));
-    }
+    _refreshAlertCount();
+    _refreshPendingCount();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
         _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
@@ -407,7 +612,16 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         type: _backendType,
       );
     }
-    _refreshing = false;
+    } finally {
+      final again = _reloadPending;
+      _reloadPending = false;
+      _refreshing = false;
+      if (again && mounted) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _loadProjectData();
+        });
+      }
+    }
   }
 
   _Member _remoteSender(String name, String photoB64) {
@@ -474,6 +688,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     ProjectSync.instance.stopPolling();
     ProjectSync.instance.onSynced = null;
     _protector.stopMonitoring();
@@ -553,6 +768,25 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                               ],
                             ),
                           ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      // Environnement actif (dev / prod)
+                      GestureDetector(
+                        onTap: () => _showEnvironmentSheet(),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(color: _envIsProd ? AppColors.warning : ThemeHelper.borderLight(context)),
+                            color: _envIsProd ? AppColors.warning.withOpacity(0.12) : Colors.transparent,
+                          ),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            SvgPicture.asset('assets/icons/globe.svg', width: 13, height: 13,
+                              colorFilter: ColorFilter.mode(_envIsProd ? AppColors.warning : ThemeHelper.textDim(context), BlendMode.srcIn)),
+                            const SizedBox(width: 5),
+                            Text(_envLabel, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: _envIsProd ? AppColors.warning : ThemeHelper.textDim(context))),
+                          ]),
                         ),
                       ),
                       // Backend error alerts
@@ -1392,13 +1626,12 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                             // Seul un administrateur peut attribuer le grade admin.
                             if (_userRole != 'admin' && role == 'admin') role = 'editor';
                             final orgs = await _backend.getOrganizations();
-                            if (orgs.isNotEmpty) {
-                              await _backend.addMember(orgs.first['id'] as String, name, email, role, projectId: widget.projectId);
-                            }
+                            final orgId = orgs.isNotEmpty ? ((orgs.first['id'] as String?) ?? '') : '';
+                            await _backend.addMember(orgId, name, email, role, projectId: widget.projectId);
                             Navigator.pop(context);
                             _loadProjectData();
                             if (!mounted) return;
-                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Invitation envoyée à $email (rôle: $selectedRole)'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Membre ajouté : $email (rôle: $selectedRole)'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
                           }
                         },
                         child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Envoyer', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))),
@@ -2035,8 +2268,9 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                 Expanded(child: GestureDetector(onTap: () {
                   if (commentController.text.trim().isNotEmpty) {
                     final replyIdx = _messages.indexOf(msg);
+                    final replyId = msg.id ?? '';
                     Navigator.pop(ctx);
-                    _sendComment(commentController.text.trim(), replyIdx);
+                    _sendComment(commentController.text.trim(), replyIdx, replyToId: replyId);
                   }
                 }, child: Container(
                   padding: const EdgeInsets.symmetric(vertical: 12),
@@ -2051,32 +2285,48 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     );
   }
 
-  void _sendComment(String text, int replyToIndex) async {
+  void _sendComment(String text, int replyToIndex, {String replyToId = ''}) async {
     if (text.trim().isEmpty) return;
-    final target = (replyToIndex >= 0 && replyToIndex < _messages.length) ? _messages[replyToIndex] : null;
-    final replyToId = (target?.id?.isNotEmpty ?? false) ? target!.id! : '';
+    var resolvedReplyId = replyToId;
+    if (resolvedReplyId.isEmpty) {
+      final target = (replyToIndex >= 0 && replyToIndex < _messages.length) ? _messages[replyToIndex] : null;
+      resolvedReplyId = (target?.id?.isNotEmpty ?? false) ? target!.id! : '';
+    }
+    _controller.clear();
+    // Base d'abord : si on affiche la bulle avant l'ecriture, un rechargement
+    // concurrent (synchro) la rafraichit avec un instantane qui ne la contient
+    // pas encore et le message tape disparait de l'ecran.
+    String id;
+    try {
+      final saved = await _backend.sendMessage(
+        widget.projectId,
+        text,
+        sender: 'user',
+        senderId: _myMemberId,
+        senderName: _currentUser?.name ?? '',
+        replyTo: resolvedReplyId,
+      );
+      id = (saved['id'] as String?) ?? '';
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _messages.add(_ChatMessage(sender: _currentUser ?? _members.first, text: '⚠️ Message non enregistré : $e', timestamp: DateTime.now(), level: MessageLevel.warning));
+      });
+      return;
+    }
+    if (!mounted) return;
     setState(() {
       _messages.add(_ChatMessage(
         sender: _currentUser!,
         text: text,
         timestamp: DateTime.now(),
         replyToIndex: replyToIndex,
-        replyToId: replyToId,
+        replyToId: resolvedReplyId,
         senderId: _myMemberId,
         fromMe: true,
+        id: id,
       ));
     });
-    _controller.clear();
-    try {
-      await _backend.sendMessage(
-        widget.projectId,
-        text,
-        sender: 'user',
-        senderId: _myMemberId,
-        senderName: _currentUser?.name ?? '',
-        replyTo: replyToId,
-      );
-    } catch (_) {}
     if (_scrollController.hasClients) {
       _scrollController.animateTo(_scrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
     }
@@ -2145,14 +2395,21 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
                         GestureDetector(
                           onTap: () async {
                             final idx = _selectedMessageIndex ?? 0;
-                            final msgId = _messages[idx].id;
+                            final targetId = (idx >= 0 && idx < _messages.length) ? (_messages[idx].id ?? '') : '';
                             Navigator.pop(ctx);
-                            if (msgId != null && msgId.isNotEmpty) {
-                              await _backend.deleteMessage(msgId);
+                            if (targetId.isNotEmpty) {
+                              await _backend.deleteMessage(targetId);
                             }
                             if (!mounted) return;
                             setState(() {
-                              _messages.removeAt(idx);
+                              // Recherche par id : pendant l'ecriture la liste
+                              // a pu etre reconstruite par une synchro et
+                              // l'index pointait un autre message.
+                              if (targetId.isNotEmpty) {
+                                _messages.removeWhere((m) => m.id == targetId);
+                              } else if (idx >= 0 && idx < _messages.length) {
+                                _messages.removeAt(idx);
+                              }
                               _selectedMessageIndex = null;
                             });
                             ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Message supprime'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
@@ -2204,6 +2461,67 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     await _backend.updateProjectStatus(widget.projectId, status, statusType: type);
   }
 
+  List<String>? _tablesCache;
+  DateTime? _tablesCacheAt;
+  String _tablesCacheKey = '';
+
+  /// Liste des tables du backend (cache 60s) : sert a eviter les 404/400
+  /// avant meme d'envoyer une requete a un nom devine.
+  Future<List<String>> _backendTables({bool force = false}) async {
+    final key = '$_backendUrl|$_backendType';
+    if (!force &&
+        _tablesCache != null &&
+        _tablesCacheKey == key &&
+        _tablesCacheAt != null &&
+        DateTime.now().difference(_tablesCacheAt!) < const Duration(seconds: 60)) {
+      return _tablesCache!;
+    }
+    try {
+      final list = await BackendAdapter.listTables(_backendUrl, _projectApiKey, type: _backendType);
+      if (list.isNotEmpty) {
+        _tablesCache = list;
+        _tablesCacheKey = key;
+        _tablesCacheAt = DateTime.now();
+      }
+      return list;
+    } catch (_) {
+      return _tablesCache ?? const <String>[];
+    }
+  }
+
+  String _tableHint(List<String> tables) =>
+      tables.isEmpty ? '' : '\n\nTables disponibles: ${tables.take(12).join(', ')}';
+
+  /// null si la table existe (ou si on ne peut pas verifier) ; sinon le
+  /// message a renvoyer au chat SANS envoyer une requete condamnee a un 404.
+  Future<String?> _requireTable(String table) async {
+    final tables = await _backendTables();
+    if (tables.isEmpty) return null;
+    if (tables.any((t) => t.toLowerCase() == table.toLowerCase())) return null;
+    return '❌ La table "$table" n\'existe pas sur ce backend.${_tableHint(tables)}';
+  }
+
+  /// null si la colonne existe ; sinon message + colonnes reelles.
+  Future<String?> _requireColumn(String table, String field) async {
+    final schema = await BackendAdapter.fetchSchema(_backendUrl, _projectApiKey, table, type: _backendType);
+    if (!schema.ok || schema.columns.isEmpty) return null;
+    final names = schema.columns.map((c) => c.name).toList();
+    if (names.any((n) => n.toLowerCase() == field.toLowerCase())) return null;
+    return '❌ La colonne "$field" n\'existe pas dans "$table".\n\nColonnes: ${names.take(15).join(', ')}';
+  }
+
+  /// /users, /products et /orders codent des noms en dur : la plupart des
+  /// backends n'ont pas ces noms-la. On prend la premiere variante presente.
+  Future<String> _resolveAliasTable(List<String> aliases) async {
+    final tables = await _backendTables();
+    final lower = tables.map((t) => t.toLowerCase()).toList();
+    for (final alias in aliases) {
+      final i = lower.indexOf(alias);
+      if (i >= 0) return tables[i];
+    }
+    return aliases.first;
+  }
+
   Future<String> _executeRealCommand(String command) async {
     _lastCmdOffline = false;
     if (_backendUrl.isEmpty) {
@@ -2216,32 +2534,66 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
 
     try {
       if (cmd == 'users') {
+        final table = await _resolveAliasTable(const ['users', 'profiles', 'members', 'membres', 'accounts', 'contacts']);
+        final guard = await _requireTable(table);
+        if (guard != null) return guard;
         if (args.isNotEmpty) {
-          final field = args[0].contains('@') ? 'email' : 'name';
-          return await _searchTable('users', field, args[0]);
+          final field = args[0].contains('@') ? 'email' : 'id';
+          final colGuard = await _requireColumn(table, field) ?? await _requireColumn(table, 'name');
+          if (colGuard != null) return colGuard;
+          final byEmail = await _searchTable(table, args[0].contains('@') ? 'email' : 'name', args[0]);
+          if (byEmail.startsWith('🔍 Aucun résultat') || byEmail.startsWith('❌')) {
+            final byId = await _searchTable(table, field, args[0]);
+            if (!byId.startsWith('🔍 Aucun résultat')) return byId;
+          }
+          return byEmail;
         }
-        return await _fetchTable('users', limit: 50);
+        return await _fetchTable(table, limit: 50);
       } else if (cmd == 'products' || cmd == 'produits') {
-        if (args.isNotEmpty) return await _searchTable('products', 'name', args.join(' '));
-        return await _fetchTable('products', limit: 50);
+        final table = await _resolveAliasTable(const ['products', 'produits', 'articles', 'items', 'catalog']);
+        final guard = await _requireTable(table);
+        if (guard != null) return guard;
+        if (args.isNotEmpty) {
+          final col = await _requireColumn(table, 'name') ?? await _requireColumn(table, 'nom');
+          if (col != null) return col;
+          return await _searchTable(table, 'name', args.join(' '));
+        }
+        return await _fetchTable(table, limit: 50);
       } else if (cmd == 'orders' || cmd == 'commandes') {
-        if (args.isNotEmpty) return await _searchTable('orders', 'id', args[0]);
-        return await _fetchTable('orders', limit: 50);
+        final table = await _resolveAliasTable(const ['orders', 'commandes', 'purchases', 'achats', 'sales']);
+        final guard = await _requireTable(table);
+        if (guard != null) return guard;
+        if (args.isNotEmpty) {
+          final col = await _requireColumn(table, 'id');
+          if (col != null) return col;
+          return await _searchTable(table, 'id', args[0]);
+        }
+        return await _fetchTable(table, limit: 50);
       } else if (cmd == 'count') {
         if (args.isEmpty) return '❌ Usage: /count <table>';
+        final guard = await _requireTable(args[0]);
+        if (guard != null) return guard;
         return await _countTable(args[0]);
       } else if (cmd == 'last') {
         if (args.isEmpty) return '❌ Usage: /last <table> [limit]';
+        final guard = await _requireTable(args[0]);
+        if (guard != null) return guard;
         final limit = args.length > 1 ? int.tryParse(args[1]) ?? 5 : 5;
         return await _fetchTable(args[0], limit: limit.clamp(1, 100));
       } else if (cmd == 'search') {
         if (args.length < 3) return '❌ Usage: /search <table> <champ> <valeur>';
+        final guard = await _requireTable(args[0]) ?? await _requireColumn(args[0], args[1]);
+        if (guard != null) return guard;
         return await _searchTable(args[0], args[1], args.sublist(2).join(' '));
       } else if (cmd == 'schema') {
         if (args.isEmpty) return '❌ Usage: /schema <table>';
+        final guard = await _requireTable(args[0]);
+        if (guard != null) return guard;
         return await _fetchSchema(args[0]);
       } else if (cmd == 'table') {
         if (args.isEmpty) return '❌ Usage: /table <nom>';
+        final guard = await _requireTable(args[0]);
+        if (guard != null) return guard;
         return await _fetchTable(args[0], limit: 20);
       }
       return '❌ Commande inconnue: "$command"\n\nTapez /help pour les commandes disponibles.';
@@ -2253,53 +2605,37 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         await BackendErrorStore.instance.record(widget.projectId, 'Backend inaccessible — connexion impossible', command: command, level: ErrorLevel.offline);
         return '⚠️ Hors ligne — le backend ne repond pas.\n\nLa commande est mise en file d\'attente et sera renvoyee automatiquement.';
       }
-      _updateProjectStatus('Erreur: $e', 'error');
-      await BackendErrorStore.instance.record(widget.projectId, '$e', command: command, level: ErrorLevel.error);
+      final detail = BackendAdapter.describeError(e);
+      _updateProjectStatus('Erreur: $detail', 'error');
+      await BackendErrorStore.instance.record(widget.projectId, detail, command: command, level: ErrorLevel.error);
       _refreshAlertCount();
-      return '❌ Erreur backend: $e';
+      return '❌ Commande impossible : $detail';
     }
   }
 
   Future<String> _fetchTable(String table, {int limit = 50}) async {
-    final clean = _backendUrl.replaceAll(RegExp(r'/+$'), '');
-    String url;
-    Map<String, String> headers;
-
-    if (_backendType == 'supabase') {
-      url = '$clean/rest/v1/$table?select=*&limit=$limit';
-      headers = {'apikey': _projectApiKey, 'Authorization': 'Bearer $_projectApiKey'};
-    } else {
-      url = '$clean/$table';
-      headers = {};
-      if (_projectApiKey.isNotEmpty) headers['Authorization'] = 'Bearer $_projectApiKey';
-      headers['Content-Type'] = 'application/json';
-    }
-
-    final dio = Dio();
-    final resp = await dio.get(url,
-      options: Options(headers: headers, receiveTimeout: const Duration(seconds: 10), validateStatus: (s) => s != null && s < 500),
+    final res = await BackendAdapter.fetchRows(
+      _backendUrl,
+      _projectApiKey,
+      table,
+      limit: limit,
+      offset: 0,
+      type: _backendType,
     );
-
-    if (resp.statusCode != 200) {
-      return '❌ Erreur ${resp.statusCode} sur "$table"\nURL: $url\n\nVérifiez que la table "$table" existe dans votre backend.';
-    }
-
-    final data = resp.data;
-    if (data is List) {
-      if (data.isEmpty) return 'ℹ️ Table "$table" vide ou inexistante.';
-      final buf = StringBuffer('📋 **$table** (${data.length} entrées):\n\n');
-      for (var i = 0; i < data.length && i < limit; i++) {
-        final item = data[i];
-        if (item is Map) {
-          buf.writeln(_formatJsonList([item]));
-          buf.writeln();
-        }
+    if (!res.ok) {
+      if (res.offline) {
+        _lastCmdOffline = true;
+        return '⚠️ Hors ligne — lecture de "$table" impossible.';
       }
-      return buf.toString();
-    } else if (data is Map) {
-      return '📋 **$table**:\n\n${_formatJsonMap(data)}';
+      return '❌ Lecture de "$table" impossible\n\n${res.error}${_tableHint(await _backendTables())}';
     }
-    return 'ℹ️ Réponse inattendue de $table';
+    if (res.rows.isEmpty) return 'ℹ️ Table "$table" vide.';
+    final buf = StringBuffer('📋 $table (${res.rows.length} entrée${res.rows.length > 1 ? 's' : ''}) :\n\n');
+    for (final row in res.rows) {
+      buf.writeln(_formatJsonList([row]));
+      buf.writeln();
+    }
+    return buf.toString().trimRight();
   }
 
   Future<String> _countTable(String table) async {
@@ -2309,7 +2645,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         _lastCmdOffline = true;
         return '⚠️ Hors ligne — impossible de compter "$table".';
       }
-      return '❌ Erreur lors du comptage de "$table": ${res.error}';
+      return '❌ Comptage de "$table" impossible\n\n${res.error}${_tableHint(await _backendTables())}';
     }
     final n = res.count!;
     final flag = res.approximate ? ' (minimum, plafonne a 1000)' : '';
@@ -2344,7 +2680,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         _lastCmdOffline = true;
         return '⚠️ Hors ligne — recherche impossible dans "$table".';
       }
-      return '❌ Erreur ${res.error} pour $field="$value" dans $table';
+      return '❌ Recherche $field="$value" dans "$table" impossible\n\n${res.error}${_tableHint(await _backendTables())}';
     }
     if (res.rows.isEmpty) return '🔍 Aucun résultat pour $field="$value" dans $table';
 
@@ -2367,28 +2703,194 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   }
 
   Future<String> _fetchSchema(String table) async {
-    final clean = _backendUrl.replaceAll(RegExp(r'/+$'), '');
-    if (_backendType == 'supabase') {
-      final url = '$clean/rest/v1/$table?select=*&limit=1';
-      final headers = {'apikey': _projectApiKey, 'Authorization': 'Bearer $_projectApiKey'};
-      final dio = Dio();
-      final resp = await dio.get(url, options: Options(headers: headers, receiveTimeout: const Duration(seconds: 10)));
-      if (resp.statusCode == 200 && resp.data is List && (resp.data as List).isNotEmpty) {
-        final row = (resp.data as List).first as Map;
-        final buf = StringBuffer('📐 Structure de la table "$table":\n\n');
-        buf.writeln('╔════════════════╦════════════════╗');
-        buf.writeln('║    Colonne     ║     Type       ║');
-        buf.writeln('╠════════════════╬════════════════╣');
-        for (final entry in row.entries) {
-          final type = entry.value.runtimeType.toString();
-          buf.writeln('║ ${entry.key.padRight(14)} ║ ${type.padRight(14)} ║');
-        }
-        buf.writeln('╚════════════════╩════════════════╝');
-        return buf.toString();
+    final schema = await BackendAdapter.fetchSchema(_backendUrl, _projectApiKey, table, type: _backendType);
+    if (!schema.ok) {
+      if (schema.offline) {
+        _lastCmdOffline = true;
+        return '⚠️ Hors ligne — structure de "$table" indisponible.';
       }
-      return '❌ Impossible de récupérer le schéma de "$table"';
+      return '❌ Structure de "$table" inaccessible\n\n${schema.error}${_tableHint(await _backendTables())}';
     }
-    return '⚠️ Schéma non supporté pour ce type de backend';
+    if (schema.columns.isEmpty) return 'ℹ️ "$table" est vide : structure indéterminable.';
+    final buf = StringBuffer('📐 Structure de la table "$table" :\n\n');
+    buf.writeln('╔══════════════════════╦══════════════════════╗');
+    buf.writeln('║ Colonne              ║ Type                 ║');
+    buf.writeln('╠══════════════════════╬══════════════════════╣');
+    for (final col in schema.columns) {
+      buf.writeln('║ ${col.name.padRight(20)} ║ ${col.type.padRight(20)} ║');
+    }
+    buf.writeln('╚══════════════════════╩══════════════════════╝');
+    if (schema.inferred) buf.writeln('\n(types devines depuis une ligne existante)');
+    return buf.toString();
+  }
+
+  /// /query <table> <champ><operateur><valeur> ... [order=...] [limit=N]
+  Future<String> _runQuery(List<String> args) async {
+    final table = args.first;
+    final tableGuard = await _requireTable(table);
+    if (tableGuard != null) return tableGuard;
+
+    final filters = <QueryFilter>[];
+    final ignored = <String>[];
+    String? orderBy;
+    var limit = 50;
+    var offset = 0;
+
+    for (final token in args.skip(1)) {
+      final low = token.toLowerCase();
+      if (low.startsWith('order=')) {
+        orderBy = token.substring('order='.length);
+        continue;
+      }
+      if (low.startsWith('limit=')) {
+        final v = int.tryParse(token.substring('limit='.length));
+        if (v == null || v < 1) return '❌ Limite invalide : "$token" (exemple : limit=20)';
+        limit = v.clamp(1, 500);
+        continue;
+      }
+      if (low.startsWith('offset=')) {
+        final v = int.tryParse(token.substring('offset='.length));
+        if (v == null || v < 0) return '❌ Offset invalide : "$token" (exemple : offset=50)';
+        offset = v.clamp(0, 1000000);
+        continue;
+      }
+      final f = QueryFilter.parse(token);
+      if (f == null) {
+        ignored.add(token);
+        continue;
+      }
+      final colGuard = await _requireColumn(table, f.field);
+      if (colGuard != null) return colGuard;
+      filters.add(f);
+    }
+
+    if (orderBy != null && orderBy!.isNotEmpty) {
+      final field = orderBy!.replaceFirst(RegExp(r'^[-]'), '');
+      final colGuard = await _requireColumn(table, field);
+      if (colGuard != null) return colGuard;
+      if (BackendAdapter.orderParam(orderBy!) == null) {
+        return '❌ Ordre invalide : "$orderBy".\n\nExemple : order=-created_at';
+      }
+    }
+    if (ignored.isNotEmpty) {
+      return '❌ Filtre(s) illisible(s) : ${ignored.join(', ')}\n\n'
+          'Syntaxe attendue : <champ><operateur><valeur>\n'
+          'Operateurs : = != > >= < <= ~\n'
+          'Exemples : status=paye · age>=18 · nom~jean · email!=null';
+    }
+
+    final res = await BackendAdapter.fetchRows(
+      _backendUrl,
+      _projectApiKey,
+      table,
+      limit: limit,
+      offset: offset,
+      type: _backendType,
+      filters: filters,
+      orderBy: orderBy,
+    );
+    if (!res.ok) {
+      if (res.offline) {
+        _lastCmdOffline = true;
+        return '⚠️ Hors ligne — requête "$table" impossible.';
+      }
+      return '❌ Requête sur "$table" impossible\n\n${res.error}${_tableHint(await _backendTables())}';
+    }
+
+    final buf = StringBuffer('🔎 /query $table');
+    for (final f in filters) {
+      buf.write(' $f');
+    }
+    if (orderBy != null && orderBy!.isNotEmpty) buf.write(' · ordre ${orderBy!}');
+    buf.writeln(' · limit $limit');
+    buf.writeln();
+    if (res.rows.isEmpty) {
+      buf.writeln('ℹ️ Aucune ligne ne correspond à ce filtre.');
+      return buf.toString().trimRight();
+    }
+    final total = res.total != null && res.total! > res.rows.length ? ' / ${res.total} au total' : '';
+    buf.writeln('${res.rows.length} ligne(s)$total :');
+    buf.writeln();
+    for (final row in res.rows) {
+      buf.writeln(_formatJsonList([row]));
+      buf.writeln();
+    }
+    return buf.toString().trimRight();
+  }
+
+  /// /rpc <fonction> [param=valeur ...] : appel direct d'une fonction
+  /// exposee par le backend (Supabase : POST /rest/v1/rpc/<fn>).
+  Future<String> _runRpc(List<String> args) async {
+    final fn = args.first;
+    if (!RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$').hasMatch(fn)) {
+      return '❌ Nom de fonction invalide : "$fn".\n\nLettres, chiffres et _ uniquement.';
+    }
+
+    final params = <String, dynamic>{};
+    final bad = <String>[];
+    for (final token in args.skip(1)) {
+      final i = token.indexOf('=');
+      if (i <= 0) {
+        bad.add(token);
+        continue;
+      }
+      params[token.substring(0, i).trim()] = _coerce(token.substring(i + 1));
+    }
+    if (bad.isNotEmpty) {
+      return '❌ Paramètre(s) illisible(s) : ${bad.join(', ')}\n\nSyntaxe : nom=valeur\n'
+          'Exemple : /rpc get_orders status=paye limit=10';
+    }
+
+    final res = await BackendAdapter.callRpc(
+      _backendUrl,
+      _projectApiKey,
+      fn,
+      params: params,
+      type: _backendType,
+    );
+    if (!res.ok) {
+      if (res.offline) {
+        _lastCmdOffline = true;
+        return '⚠️ Hors ligne — appel de "$fn" impossible.';
+      }
+      return '❌ Appel de "$fn" impossible\n\n${res.error}';
+    }
+
+    final buf = StringBuffer('⚡ Fonction "$fn" exécutée (HTTP ${res.statusCode})');
+    if (params.isNotEmpty) {
+      buf.write('\nParamètres : ');
+      buf.write(params.entries.map((e) => '${e.key}=${e.value}').join(', '));
+    }
+    buf.writeln('\n');
+    final data = res.data;
+    if (data == null) {
+      buf.writeln('✅ Terminé (aucune donnée renvoyée).');
+    } else if (data is Map || data is List) {
+      buf.writeln(const JsonEncoder.withIndent('  ').convert(data));
+    } else {
+      buf.writeln('$data');
+    }
+    return buf.toString().trimRight();
+  }
+
+  /// Transforme la valeur texte d'un paramètre /rpc en type JSON raisonnable.
+  dynamic _coerce(String raw) {
+    final t = raw.trim();
+    final low = t.toLowerCase();
+    if (low == 'true') return true;
+    if (low == 'false') return false;
+    if (low == 'null') return null;
+    if (RegExp(r'^-?\d+$').hasMatch(t)) return int.tryParse(t) ?? t;
+    if (RegExp(r'^-?\d+\.\d+$').hasMatch(t)) return double.tryParse(t) ?? t;
+    if (t.length > 1 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) {
+      return t.substring(1, t.length - 1);
+    }
+    if (t.startsWith('{') || t.startsWith('[')) {
+      try {
+        return jsonDecode(t);
+      } catch (_) {}
+    }
+    return t;
   }
 
   void _sendCommand(String command) async {
@@ -2403,19 +2905,24 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
       }
     }
 
-    setState(() {
-      _showCommands = false;
-      _messages.add(_ChatMessage(sender: _currentUser!, text: command, timestamp: DateTime.now(), senderId: _myMemberId, fromMe: true));
-      _isTyping = true;
-    });
     _controller.clear();
+    // Base d'abord (cf. _sendComment) : une bulle ajoutee avant l'ecriture
+    // disparait des que la synchro recharge la liste.
+    String cmdId;
     try {
-      await _backend.sendMessage(widget.projectId, command, sender: 'user', senderId: _myMemberId, senderName: _currentUser?.name ?? '');
+      final saved = await _backend.sendMessage(widget.projectId, command, sender: 'user', senderId: _myMemberId, senderName: _currentUser?.name ?? '');
+      cmdId = (saved['id'] as String?) ?? '';
     } catch (e) {
       if (!mounted) return;
       setState(() { _isTyping = false; });
       return;
     }
+    if (!mounted) return;
+    setState(() {
+      _showCommands = false;
+      _messages.add(_ChatMessage(sender: _currentUser!, text: command, timestamp: DateTime.now(), senderId: _myMemberId, fromMe: true, id: cmdId));
+      _isTyping = true;
+    });
 
     if (!command.startsWith('/')) {
       setState(() { _isTyping = false; });
@@ -2472,17 +2979,34 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   }
 
   Future<void> _botSay(String text) async {
+    String id = '';
     try {
-      await _backend.sendMessage(widget.projectId, text, sender: 'bot', senderName: _members.isNotEmpty ? _members.first.name : 'Bot');
+      final saved = await _backend.sendMessage(widget.projectId, text, sender: 'bot', senderName: _members.isNotEmpty ? _members.first.name : 'Bot');
+      id = (saved['id'] as String?) ?? '';
     } catch (_) {}
     if (!mounted) return;
     setState(() {
       _isTyping = false;
-      _messages.add(_ChatMessage(sender: _members.first, text: text, timestamp: DateTime.now()));
+      _messages.add(_ChatMessage(sender: _members.first, text: text, timestamp: DateTime.now(), id: id));
     });
   }
 
   bool _ensureBackend() => _backendUrl.isNotEmpty;
+
+  /// Seuls les administrateurs ecrivent dans les tables backend
+  /// (ajout, modification, suppression). '' = role non resolu -> interdit.
+  String? _adminOnly() {
+    if (_userRole == 'admin') return null;
+    if (_userRole.isEmpty) {
+      return '🔒 Rôle introuvable\n\n'
+          'Impossible de déterminer votre rôle dans ce projet : l\'écriture est donc bloquée.\n\n'
+          'Ouvrez Réglages → Membres, vérifiez que la liste est chargée (synchro OK), puis réessayez.';
+    }
+    final label = _userRole == 'editor' ? 'Éditeur' : 'Lecteur';
+    return '🔒 Réservé aux administrateurs\n\n'
+        'Seul un admin peut ajouter, modifier ou supprimer des lignes dans les tables.\n'
+        'Votre rôle : $label.';
+  }
 
   String get _noBackendMsg =>
       '⚠️ Aucun backend configuré.\n\nConnectez un backend via le menu → Backend pour interroger vos données.\n\nTapez /help pour les commandes disponibles.';
@@ -2516,6 +3040,12 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
 
       case 'version':
         return _versionInfo();
+
+      case 'env':
+      case 'environnement':
+      case 'environment':
+        if (args.isEmpty) return await _listEnvironments();
+        return await _switchEnvironment(args.join(' '));
 
       case 'tables':
         if (!_ensureBackend()) return _noBackendMsg;
@@ -2565,21 +3095,39 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
 
       case 'insert':
         if (!_ensureBackend()) return _noBackendMsg;
-        return await _writeInsert(args);
+        return _adminOnly() ?? await _writeInsert(args);
 
       case 'update':
         if (!_ensureBackend()) return _noBackendMsg;
-        return await _writeUpdate(args);
+        return _adminOnly() ?? await _writeUpdate(args);
 
       case 'delete':
         if (!_ensureBackend()) return _noBackendMsg;
-        return await _writeDelete(args);
+        return _adminOnly() ?? await _writeDelete(args);
 
       case 'edit':
         return '__NAV_TABLES__';
 
       case 'query':
-        return 'ℹ️ Les requêtes SQL brutes ne sont pas possibles via une API REST.\n\nUtilisez plutôt :\n• /search <table> <champ> <valeur>\n• /table <nom>\n• /count <table>\n• /inspect pour l\'explorateur complet';
+        if (!_ensureBackend()) return _noBackendMsg;
+        if (args.isEmpty) {
+          return '❌ Usage: /query <table> <champ>=<valeur> [autres filtres] [order=-champ] [limit=N]\n\n'
+              'Operateurs : = != > >= < <= ~ (contient)\n'
+              'Exemples :\n'
+              '  /query orders status=paye\n'
+              '  /query users age>=18 order=-created_at limit=10\n'
+              '  /query users nom~jean email!=null';
+        }
+        return await _runQuery(args);
+
+      case 'rpc':
+        if (!_ensureBackend()) return _noBackendMsg;
+        if (args.isEmpty) {
+          return '❌ Usage: /rpc <fonction> [param=valeur ...]\n\n'
+              'Exemple : /rpc get_orders status=paye limit=10\n\n'
+              'La fonction doit être exposée en RPC par votre backend (Supabase : schéma public).';
+        }
+        return await _runRpc(args);
 
       case 'restart':
         return 'ℹ️ Prone ne redémarre pas votre backend : ce serait dangereux de l\'extérieur.\n\nGérez le redémarrage depuis votre hébergeur (Supabase, Render, Vercel, etc.).';
@@ -2625,12 +3173,12 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     final res = await BackendAdapter.check(_backendUrl, _projectApiKey, type: _backendType);
     sw.stop();
     if (!res.online) {
-      setState(() => _isConnected = false);
+      if (mounted) setState(() => _isConnected = false);
       await BackendErrorStore.instance.record(widget.projectId, 'Ping échoué', command: '/ping', level: ErrorLevel.offline);
       await _refreshAlertCount();
       return '❌ Ping échoué — backend injoignable.\n\n${res.message}';
     }
-    setState(() => _isConnected = true);
+    if (mounted) setState(() => _isConnected = true);
     return '🏓 Pong !\n\n'
         'URL: $_backendUrl\n'
         'HTTP: ${res.statusCode}\n'
@@ -2763,13 +3311,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
     'accounts', 'account', 'clients', 'contacts', 'people', 'personnes',
   ];
 
-  Future<List<String>> _listBackendTables() async {
-    try {
-      return await BackendAdapter.listTables(_backendUrl, _projectApiKey, type: _backendType);
-    } catch (_) {
-      return const <String>[];
-    }
-  }
+  Future<List<String>> _listBackendTables() => _backendTables();
 
   /// Le schema n'est pas universel : Supabase a souvent `profiles`, un
   /// backend Express a `users`. Figer `users` donnait un 404 systématique.
@@ -2824,18 +3366,104 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   Future<String> _environmentName() async {
     try {
       final conns = await _backend.getConnections(widget.projectId);
-      final target = _backendUrl.replaceAll(RegExp(r'/+$'), '');
-      for (final c in conns) {
-        if ('${c['url']}'.replaceAll(RegExp(r'/+$'), '') == target) {
-          final name = '${c['name']}';
-          if (name.isNotEmpty) return name;
-        }
-      }
+      final env = Environments.active(Environments.parse(conns), _backendUrl);
+      if (env != null) return env.name;
     } catch (_) {}
     return 'Non défini';
   }
 
   bool _isProduction(String env) => env.toLowerCase().contains('prod');
+
+  Future<List<EnvironmentInfo>> _environments() async {
+    try {
+      final conns = await _backend.getConnections(widget.projectId);
+      return Environments.parse(conns);
+    } catch (_) {
+      return const <EnvironmentInfo>[];
+    }
+  }
+
+  /// /env : liste les environnements enregistres et lequel est actif.
+  Future<String> _listEnvironments() async {
+    final envs = await _environments();
+    if (envs.isEmpty) {
+      return 'ℹ️ Aucun environnement enregistré.\n\n'
+          'Ajoutez une connexion (bouton Connexions du projet) : nommez-la "dev" ou "prod" —\n'
+          'le nom "prod" déclenche la confirmation obligatoire à chaque écriture.\n\n'
+          'Backend actuel : ${_backendUrl.isEmpty ? "aucun" : _backendUrl}';
+    }
+    final buf = StringBuffer('🌍 Environnements — ${envs.length}\n\n');
+    final current = Environments.active(envs, _backendUrl);
+    for (final e in envs) {
+      final isActive = current != null && current.id == e.id;
+      buf.writeln('${isActive ? '▶' : '  '} ${e.name}${e.isProduction ? '  ⚠️ PROD' : ''}');
+      buf.writeln('      ${e.url}${isActive ? '   (actif)' : ''}');
+    }
+    if (current == null) {
+      buf.writeln('\n⚠️ Le backend actuel ne correspond à aucune connexion : les écritures de production ne sont pas protégées.');
+    }
+    buf.writeln('\nChanger : /env <nom>');
+    return buf.toString().trimRight();
+  }
+
+  /// /env <nom> : bascule l'URL et la cle API du projet sur cet environnement.
+  Future<String> _switchEnvironment(String name) async {
+    final envs = await _environments();
+    if (envs.isEmpty) {
+      return '❌ Aucun environnement enregistré pour ce projet.\n\nAjoutez d\'abord une connexion.';
+    }
+    final target = Environments.find(envs, name);
+    if (target == null) {
+      final names = envs.map((e) => e.name).join(', ');
+      return '❌ Environnement "$name" introuvable.\n\nDisponibles : $names';
+    }
+    if (!target.hasUrl) {
+      return '❌ L\'environnement "${target.name}" n\'a pas d\'URL.';
+    }
+    if (Environments.sameUrl(target.url, _backendUrl)) {
+      return 'ℹ️ "${target.name}" est déjà l\'environnement actif.\n\n$_backendUrl';
+    }
+
+    final updates = <String, dynamic>{'backend_url': target.url};
+    var keyNote = 'clé API : inchangée';
+    if (target.apiKey.isNotEmpty) {
+      updates['api_key'] = target.apiKey;
+      keyNote = 'clé API : celle de la connexion';
+    }
+    await _backend.updateProject(widget.projectId, updates);
+
+    if (!mounted) return '🌍 Environnement actif : ${target.name}';
+    setState(() {
+      _backendUrl = target.url;
+      if (target.apiKey.isNotEmpty) _projectApiKey = target.apiKey;
+      _backendType = BackendAdapter.detect(_backendUrl, null).name;
+      _envName = target.name;
+      _lastEnv = target.name;
+      _tablesCache = null;
+      _tablesCacheAt = null;
+      _tablesCacheKey = '';
+      _isConnected = true;
+    });
+
+    // Relance la synchro sur la NOUVELLE URL : sinon le timer tourne
+    // encore contre l'ancien backend (messages envoyes au mauvais endroit).
+    ProjectSync.instance.startPolling(
+      projectId: widget.projectId,
+      url: _backendUrl,
+      apiKey: _projectApiKey,
+      type: _backendType,
+    );
+
+    final buf = StringBuffer('🌍 Environnement actif : ${target.name}\n\n');
+    buf.writeln('URL : ${target.url}');
+    buf.writeln(keyNote);
+    if (target.isProduction) {
+      buf.writeln('\n⚠️ PRODUCTION — chaque écriture exigera `confirm prod`.');
+    } else {
+      buf.writeln('\nLecture seule possible sans confirmation, écriture avec `confirm`.');
+    }
+    return buf.toString().trimRight();
+  }
 
   dynamic _parseWriteValue(String raw) {
     final l = raw.toLowerCase();
@@ -2902,6 +3530,8 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   }
 
   String? _lastEnv;
+  String _envName = 'Non défini';
+  bool get _envIsProd => _envName.toLowerCase().contains('prod');
 
   String _formatWriteResult(WriteResult res, String verb, String table) {
     if (!res.ok) {
@@ -2909,7 +3539,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
         _lastCmdOffline = true;
         return '⚠️ Hors ligne — $verb non effectué(e).\n\nLa commande est mise en file d\'attente.';
       }
-      return '❌ $verb refusé(e) par "$table"\n\n${res.error}\nHTTP ${res.statusCode}';
+      return '❌ $verb refusé(e) par "$table"\n\n${res.error}';
     }
     final n = res.affected ?? 1;
     final buf = StringBuffer('✅ $verb réussie — "$table"\n\n');
@@ -3217,7 +3847,7 @@ class _ProjectDetailScreenState extends State<ProjectDetailScreen> {
   Future<String> _listTables() async {
     if (_backendUrl.isEmpty) return '⚠️ Aucun backend configuré.';
     try {
-      final tables = await BackendAdapter.listTables(_backendUrl, _projectApiKey, type: _backendType);
+      final tables = await _backendTables(force: true);
       if (tables.isEmpty) return 'ℹ️ Aucune table/endpoint détecté.\n\nLe backend pourrait ne pas exposer de tables accessibles.';
       final buffer = StringBuffer('📋 Tables/Endpoints détectés:\n\n');
       for (final t in tables) {

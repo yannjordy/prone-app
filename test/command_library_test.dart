@@ -52,6 +52,7 @@ void main() {
     for (final expected in [
       'help', 'status', 'ping', 'protect', 'alerts', 'version',
       'tables', 'inspect', 'table', 'count', 'schema', 'last', 'search',
+      'query', 'rpc',
       'endpoints', 'requests', 'errors',
       'workflows', 'run', 'history',
       'users', 'user', 'orders', 'products',
@@ -62,8 +63,17 @@ void main() {
 
   test('les commandes inventees ont ete supprimees', () {
     final names = CommandLibrary.commands.map((c) => c.name).toSet();
-    for (final removed in ['restart', 'query', 'uptime']) {
+    // /query est redevenue une vraie commande : elle est retiree de cette
+    // liste puisqu'elle interroge maintenant le backend reellement.
+    for (final removed in ['restart', 'uptime']) {
       expect(names.contains(removed), isFalse, reason: '/$removed doit avoir ete supprime');
+    }
+  });
+
+  test('aucune commande du catalogue ne repond par un texte fige', () {
+    final names = CommandLibrary.commands.map((c) => c.name).toSet();
+    for (final real in ['query', 'rpc', 'count', 'search', 'table', 'insert']) {
+      expect(names.contains(real), isTrue, reason: '/$real doit exister');
     }
   });
 

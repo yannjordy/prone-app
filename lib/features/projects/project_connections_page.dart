@@ -3,6 +3,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 import 'dart:ui';
 import '../../app/app.dart';
+import '../../core/backend/environments.dart';
 import '../../core/local/local_backend.dart';
 
 class ProjectConnectionsPage extends StatefulWidget {
@@ -21,6 +22,7 @@ class _ProjectConnectionsPageState extends State<ProjectConnectionsPage> {
   final _keyController = TextEditingController();
 
   List<Map<String, dynamic>> _connections = [];
+  String _activeUrl = '';
 
   @override
   void initState() {
@@ -30,8 +32,24 @@ class _ProjectConnectionsPageState extends State<ProjectConnectionsPage> {
 
   Future<void> _loadConnections() async {
     final conns = await _backend.getConnections(widget.projectId);
-    if (mounted) setState(() => _connections = conns);
+    String active = '';
+    try {
+      final projects = await _backend.getProjects();
+      final match = projects.where((p) => p['id'] == widget.projectId).toList();
+      if (match.isNotEmpty) active = '${match.first['backend_url'] ?? ''}';
+    } catch (_) {}
+    if (mounted) setState(() { _connections = conns; _activeUrl = active; });
   }
+
+  Widget _badge(String text, Color color) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.14),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: color.withOpacity(0.5)),
+        ),
+        child: Text(text, style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: color)),
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -152,6 +170,8 @@ class _ProjectConnectionsPageState extends State<ProjectConnectionsPage> {
       itemBuilder: (context, index) {
         final conn = _connections[index];
         final status = (conn['status'] as String?) ?? 'connected';
+        final isActive = Environments.sameUrl((conn['url'] as String?) ?? '', _activeUrl);
+        final isProd = ((conn['name'] as String?) ?? '').toLowerCase().contains('prod');
         final statusColor = status == 'online' || status == 'connected' ? AppColors.success : (status == 'degraded' ? AppColors.warning : AppColors.error);
 
         return Dismissible(
@@ -196,7 +216,17 @@ class _ProjectConnectionsPageState extends State<ProjectConnectionsPage> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text((conn['name'] as String?) ?? 'Connexion', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: textColor)),
+                          Row(children: [
+                            Flexible(child: Text((conn['name'] as String?) ?? 'Connexion', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: textColor))),
+                            if (isActive) ...[
+                              const SizedBox(width: 6),
+                              _badge('ACTIF', AppColors.success),
+                            ],
+                            if (isProd) ...[
+                              const SizedBox(width: 6),
+                              _badge('PROD', AppColors.warning),
+                            ],
+                          ]),
                           Text((conn['url'] as String?) ?? '', style: TextStyle(fontSize: 12, color: textDimColor), maxLines: 1, overflow: TextOverflow.ellipsis),
                         ],
                       ),
@@ -243,6 +273,11 @@ class _ProjectConnectionsPageState extends State<ProjectConnectionsPage> {
                 Text('URL de votre API + clé d\'accès', style: TextStyle(fontSize: 13, color: textDimColor)),
                 const SizedBox(height: 24),
                 _buildInput('Nom', _nameController, 'Mon Backend'),
+                Padding(
+                  padding: const EdgeInsets.only(top: 4, bottom: 8),
+                  child: Text('Nommez-la « dev » ou « prod » : une connexion « prod » exige `confirm prod` à chaque écriture.',
+                    style: TextStyle(fontSize: 11, color: textDimColor.withOpacity(0.8))),
+                ),
                 const SizedBox(height: 12),
                 _buildInput('URL', _urlController, 'https://api.example.com'),
                 const SizedBox(height: 12),

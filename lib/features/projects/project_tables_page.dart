@@ -27,6 +27,10 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
 
   bool _loading = true;
   bool _loadingRows = false;
+  // Lecture seule tant que le role n'est pas resolu : seuls les admins
+  // ajoutent, modifient ou suppriment des lignes.
+  String _userRole = '';
+  bool _isAdmin = false;
   String? _pageError;
   bool _offline = false;
 
@@ -108,6 +112,8 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
     _backendUrl = (p['backend_url'] as String?) ?? '';
     _apiKey = (p['api_key'] as String?) ?? '';
     _backendType = BackendAdapter.detect(_backendUrl, null).name;
+    _userRole = await _backend.resolveRole(widget.projectId);
+    _isAdmin = _userRole == 'admin';
 
     if (_backendUrl.isEmpty) {
       setState(() { _loading = false; _pageError = 'Aucun backend configure pour ce projet.'; });
@@ -270,7 +276,7 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
                   style: TextStyle(fontSize: 11, color: _offline ? AppColors.error : ThemeHelper.textDim(context))),
             ]),
           ),
-          if (_selectedTable != null) ...[
+          if (_selectedTable != null && _isAdmin) ...[
             const SizedBox(width: 8),
             GestureDetector(
               onTap: () => _showRowForm(),
@@ -533,7 +539,7 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
               Row(children: [
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: () { Navigator.pop(ctx); _showRowForm(initial: row); },
+                    onPressed: _isAdmin ? () { Navigator.pop(ctx); _showRowForm(initial: row); } : null,
                     icon: SvgPicture.asset('assets/icons/edit.svg', width: 15, height: 15, colorFilter: const ColorFilter.mode(AppColors.primary, BlendMode.srcIn)),
                     label: const Text('Modifier', style: TextStyle(color: AppColors.primary, fontWeight: FontWeight.w600)),
                     style: OutlinedButton.styleFrom(
@@ -546,7 +552,7 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
                 const SizedBox(width: 10),
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: () { Navigator.pop(ctx); _confirmDelete(row); },
+                    onPressed: _isAdmin ? () { Navigator.pop(ctx); _confirmDelete(row); } : null,
                     icon: SvgPicture.asset('assets/icons/trash.svg', width: 15, height: 15, colorFilter: const ColorFilter.mode(AppColors.error, BlendMode.srcIn)),
                     label: const Text('Supprimer', style: TextStyle(color: AppColors.error, fontWeight: FontWeight.w600)),
                     style: OutlinedButton.styleFrom(
@@ -708,7 +714,20 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
     return value.toString();
   }
 
+  String? _adminOnly() {
+    if (_isAdmin) return null;
+    if (_userRole.isEmpty) {
+      return 'Rôle introuvable : vérifiez la liste des membres dans Réglages.';
+    }
+    return 'Seul un administrateur peut ajouter, modifier ou supprimer des lignes.';
+  }
+
   Future<void> _showRowForm({Map<String, dynamic>? initial}) async {
+    final denied = _adminOnly();
+    if (denied != null) {
+      _toast('🔒 $denied');
+      return;
+    }
     final table = _selectedTable;
     if (table == null) return;
     final isEdit = initial != null;
@@ -895,6 +914,11 @@ class _ProjectTablesPageState extends State<ProjectTablesPage> {
   }
 
   Future<void> _confirmDelete(Map<String, dynamic> row) async {
+    final denied = _adminOnly();
+    if (denied != null) {
+      _toast('🔒 $denied');
+      return;
+    }
     final table = _selectedTable;
     if (table == null) return;
     final idCol = await _resolveIdColumn();

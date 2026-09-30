@@ -14,6 +14,7 @@ import '../../core/deep_link/deep_links.dart';
 import '../../core/local/local_backend.dart';
 import '../../core/backend/backend_adapter.dart';
 import '../../core/backend/invite_payload.dart';
+import '../../core/backend/project_sync.dart';
 import '../../core/local/user_profile.dart';
 import 'qr_scanner_page.dart';
 
@@ -93,6 +94,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
 
   Future<void> _loadProjects() async {
     final rawProjects = await _backend.getProjects();
+    if (!mounted) return;
     setState(() {
       _projects = rawProjects.map((p) {
         final name = (p['name'] as String?) ?? '';
@@ -130,6 +132,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
 
   Future<void> _loadViewPreference() async {
     final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
     setState(() => _isGridView = prefs.getBool('project_view_grid') ?? false);
   }
 
@@ -146,7 +149,8 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
       has = projects.any((p) => ((p['backend_url'] as String?) ?? '').isNotEmpty);
       await prefs.setBool('has_backend', has);
     }
-    if (mounted) setState(() => _hasBackend = has);
+    if (!mounted) return;
+    setState(() => _hasBackend = has);
   }
 
   List<_Project> get _filteredProjects {
@@ -319,7 +323,7 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
           ),
         if (_showCreateForm)
           GestureDetector(
-            onTap: () => setState(() => _showCreateForm = false),
+            onTap: () => setState(() { _showCreateForm = false; _createFormStep = 0; _isVerifying = false; }),
             child: ClipRect(
               child: BackdropFilter(
                 filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
@@ -916,28 +920,41 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
     }
     try {
       final name = _newNameController.text;
-      final project = await _backend.createProject(name, _newDescController.text, apiKey: _apiKeyController.text, backendUrl: _backendUrlController.text);
+      // Organisation d'abord : elle sert d'organization_id au projet ET au
+      // membre createur (sans elle le createur n'etait jamais enregistre et
+      // les ecrans Organisation restaient vides).
+      var orgs = await _backend.getOrganizations();
+      if (orgs.isEmpty) {
+        await _backend.createOrganization('Mon Espace', '');
+        orgs = await _backend.getOrganizations();
+      }
+      final orgId = orgs.isNotEmpty ? ((orgs.first['id'] as String?) ?? '') : '';
+      final project = await _backend.createProject(
+        name,
+        _newDescController.text,
+        apiKey: _apiKeyController.text,
+        backendUrl: _backendUrlController.text,
+        organizationId: orgId,
+      );
       final projectId = project['id'] as String;
       final prefs = await SharedPreferences.getInstance();
       if (_backendUrlController.text.trim().isNotEmpty) {
         await prefs.setBool('has_backend', true);
         if (mounted) setState(() => _hasBackend = true);
       }
-      // Add creator as admin member for this project
-      final orgs = await _backend.getOrganizations();
-      if (orgs.isNotEmpty) {
-        final profile = await UserProfile.load();
-        final creatorName = profile['name']!.trim();
-        final creator = await _backend.addMember(
-          orgs.first['id'] as String,
-          creatorName.isEmpty ? 'Admin' : creatorName,
-          profile['email']!.trim(),
-          'admin',
-          projectId: projectId,
-          photo: profile['photo'],
-        );
-        await prefs.setString('member_id_$projectId', (creator['id'] as String?) ?? '');
-      }
+      // Le createur est toujours membre admin : c'est ce qui rend l'ecriture
+      // (et la gestion des membres) possible des la premiere seconde.
+      final profile = await UserProfile.load();
+      final creatorName = profile['name']!.trim();
+      final creator = await _backend.addMember(
+        orgId,
+        creatorName.isEmpty ? 'Admin' : creatorName,
+        profile['email']!.trim(),
+        'admin',
+        projectId: projectId,
+        photo: profile['photo'],
+      );
+      await prefs.setString('member_id_$projectId', (creator['id'] as String?) ?? '');
       setState(() {
         _showCreateForm = false;
         _createFormStep = 0;
@@ -948,10 +965,24 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
         _backendUrlController.clear();
       });
       _loadProjects();
+      // Pousse immediatement projet + membre createur : les autres
+      // appareils voient le projet sans attendre l'ouverture du chat.
+      final bUrl = ((project['backend_url'] as String?) ?? '').trim();
+      if (bUrl.isNotEmpty) {
+        unawaited(ProjectSync.instance.syncNow(
+          projectId: projectId,
+          url: bUrl,
+          apiKey: (project['api_key'] as String?) ?? '',
+          type: BackendAdapter.detect(bUrl, null).name,
+        ));
+      }
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Projet "$name" cree'), backgroundColor: AppColors.success, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
     } catch (e) {
       if (!mounted) return;
+      // Sinon le formulaire reste bloque sur "Verification en cours..."
+      // et aucune nouvelle tentative n'est possible.
+      setState(() { _createFormStep = 0; _isVerifying = false; });
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur: $e'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
     }
   }
@@ -1065,7 +1096,11 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
                             }
                           }
                           if (!mounted) return;
-                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Lien ou code invalide'), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+                          final isCode = RegExp(r'^\d{6}$').hasMatch(raw);
+                          final msg = isCode
+                              ? 'Code non trouvé sur cet appareil.\nLe code à 6 chiffres ne fonctionne que sur l\'appareil du créateur : demandez le QR ou le lien complet.'
+                              : 'Lien ou code invalide';
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
                         },
                         child: Container(padding: const EdgeInsets.symmetric(vertical: 14), decoration: BoxDecoration(gradient: AppColors.gradient, borderRadius: BorderRadius.circular(12)), child: const Center(child: Text('Rejoindre', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)))),
                       )),
@@ -1190,7 +1225,16 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
                     tween: Tween(begin: 0.0, end: 1.0),
                     duration: const Duration(milliseconds: 2200),
                     onEnd: () async {
-                      final error = await _joinProject(payload, legacyId);
+                      String? error;
+                      try {
+                        error = await _joinProject(payload, legacyId);
+                      } catch (e) {
+                        error = 'Échec de la jointure : $e';
+                      } finally {
+                        // Autorise a nouveau le meme lien : sinon il ne
+                        // fonctionne qu'une seule fois par session.
+                        _lastImportedLink = null;
+                      }
                       if (ctx.mounted) Navigator.pop(ctx);
                       if (!mounted) return;
                       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -1308,28 +1352,62 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
         projectId = duplicates.first['id'] as String;
       }
     }
-    await prefs.setBool('has_backend', backendUrl.trim().isNotEmpty);
+    // Recalcul global : ecraser ce drapeau a l'execution d'un projet sans
+    // backend desactivait l'ajout de projet alors que d'autres sont conectes.
+    final allProjects = await _backend.getProjects();
+    await prefs.setBool('has_backend',
+        allProjects.any((p) => ((p['backend_url'] as String?) ?? '').trim().isNotEmpty) || backendUrl.trim().isNotEmpty);
     if (payload != null && invitedId.isNotEmpty) {
       // La photo/description arrivent par la synchro : on laisse la source
       // distante gagner au premier cycle.
       await _backend.preferRemoteProject(projectId);
     }
 
+    if (backendUrl.trim().isNotEmpty) {
+      // On tire l'etat distant AVANT de lire la liste : l'inviteur a deja
+      // cree une ligne pour nous, sans ce tirage on en creerait une seconde
+      // (deux entrees pour la meme personne) et l'inviteur verrait un doublon.
+      await ProjectSync.instance.syncNow(
+        projectId: projectId,
+        url: backendUrl.trim(),
+        apiKey: apiKey,
+        type: BackendAdapter.detect(backendUrl, null).name,
+      );
+    }
+
     final members = await _backend.getMembersByProject(projectId);
-    if (inviter.isNotEmpty && !members.any((m) => ((m['name'] as String?) ?? '') == inviter)) {
-      await _backend.addMember(orgId, inviter, '', 'admin', projectId: projectId);
+    final inviterKey = inviter.trim().toLowerCase();
+    if (inviter.isNotEmpty && inviterKey.isNotEmpty && !members.any((m) => ((m['name'] as String?) ?? '').trim().toLowerCase() == inviterKey)) {
+      await _backend.addMember(orgId, inviter.trim(), '', 'admin', projectId: projectId);
     }
 
     String? knownId = prefs.getString('member_id_$projectId') ?? '';
     if (knownId.isNotEmpty && !members.any((m) => (m['id'] as String?) == knownId)) {
       knownId = '';
     }
-    final mine = knownId.isNotEmpty
-        ? members.firstWhere((m) => (m['id'] as String?) == knownId, orElse: () => <String, dynamic>{})
-        : members.firstWhere(
-            (m) => ((m['name'] as String?) ?? '') == meName,
-            orElse: () => <String, dynamic>{},
-          );
+    // Identite : id connu, puis email, puis nom. Sans le repli email, un
+    // inviteur qui avait ecrit "Bob" pendant que le profil dit "Robert"
+    // aurait cree une deuxieme entree pour la meme personne.
+    Map<String, dynamic> mine = <String, dynamic>{};
+    if (knownId.isNotEmpty) {
+      final hit = members.firstWhere((m) => (m['id'] as String?) == knownId, orElse: () => <String, dynamic>{});
+      if (hit.isNotEmpty) mine = hit;
+    }
+    if (mine.isEmpty && meEmail.isNotEmpty) {
+      final hit = members.firstWhere(
+        (m) => ((m['email'] as String?) ?? '').trim().toLowerCase() == meEmail.toLowerCase(),
+        orElse: () => <String, dynamic>{},
+      );
+      if (hit.isNotEmpty) mine = hit;
+    }
+    if (mine.isEmpty) {
+      final meKey = meName.trim().toLowerCase();
+      final hit = members.firstWhere(
+        (m) => ((m['name'] as String?) ?? '').trim().toLowerCase() == meKey,
+        orElse: () => <String, dynamic>{},
+      );
+      if (hit.isNotEmpty) mine = hit;
+    }
     if (mine.isNotEmpty) {
       await prefs.setString('member_id_$projectId', (mine['id'] as String?) ?? '');
       await _backend.updateMember((mine['id'] as String?) ?? '', {
@@ -1339,6 +1417,17 @@ class _ProjectListScreenState extends State<ProjectListScreen> with TickerProvid
     } else {
       final me = await _backend.addMember(orgId, meName, meEmail, 'editor', projectId: projectId, photo: mePhoto);
       await prefs.setString('member_id_$projectId', (me['id'] as String?) ?? '');
+    }
+
+    // Pousse immediatement le projet et le membre rejoignant : l'inviteur
+    // le voit apparaitre sans attendre la prochaine ouverture de son chat.
+    if (backendUrl.trim().isNotEmpty) {
+      unawaited(ProjectSync.instance.syncNow(
+        projectId: projectId,
+        url: backendUrl.trim(),
+        apiKey: apiKey,
+        type: BackendAdapter.detect(backendUrl, null).name,
+      ));
     }
 
     _loadProjects();

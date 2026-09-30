@@ -3,6 +3,96 @@ import 'request_log.dart';
 
 enum BackendType { supabase, firebase, node, python, java, express, nextjs, nestjs, fastapi, django, flask, generic }
 
+enum FilterOp { eq, neq, gt, gte, lt, lte, contains, isNull, notNull }
+
+/// Filtre de /query : champ + operateur + valeur, traduit en parametres
+/// PostgREST (`age=gte.18`). Aucune ecriture SQL n'est jamais construite.
+class QueryFilter {
+  final String field;
+  final FilterOp op;
+  final String value;
+  const QueryFilter(this.field, this.op, this.value);
+
+  /// Analyse `age>=18`, `email=jean@x.fr`, `nom~jean`, `email=null`.
+  /// Retourne null si la syntaxe n'est pas reconnue : rien n'est devine.
+  static QueryFilter? parse(String raw) {
+    final expr = raw.trim();
+    if (expr.isEmpty) return null;
+    const ops = ['!=', '>=', '<=', '=', '>', '<', '~'];
+    String? found;
+    var index = -1;
+    for (final o in ops) {
+      final i = expr.indexOf(o);
+      if (i > 0) {
+        found = o;
+        index = i;
+        break;
+      }
+    }
+    if (found == null || index < 0) return null;
+    final field = expr.substring(0, index).trim();
+    final value = expr.substring(index + found.length).trim();
+    if (field.isEmpty || value.isEmpty) return null;
+    final isNullish = value.toLowerCase() == 'null';
+    switch (found) {
+      case '!=':
+        return QueryFilter(field, isNullish ? FilterOp.notNull : FilterOp.neq, isNullish ? '' : value);
+      case '>':
+        return QueryFilter(field, FilterOp.gt, value);
+      case '>=':
+        return QueryFilter(field, FilterOp.gte, value);
+      case '<':
+        return QueryFilter(field, FilterOp.lt, value);
+      case '<=':
+        return QueryFilter(field, FilterOp.lte, value);
+      case '~':
+        return QueryFilter(field, FilterOp.contains, value);
+      default:
+        return QueryFilter(field, isNullish ? FilterOp.isNull : FilterOp.eq, isNullish ? '' : value);
+    }
+  }
+
+  /// Parametre d'URL. Retourne null quand ce backend ne sait pas l'exprimer
+  /// (on prefere ignorer le filtre plutot que d'envoyer une requete fausse).
+  String? toQuery({required bool supabase}) {
+    final f = Uri.encodeComponent(field);
+    final v = Uri.encodeComponent(value);
+    if (supabase) {
+      return switch (op) {
+        FilterOp.eq => '$f=eq.$v',
+        FilterOp.neq => '$f=neq.$v',
+        FilterOp.gt => '$f=gt.$v',
+        FilterOp.gte => '$f=gte.$v',
+        FilterOp.lt => '$f=lt.$v',
+        FilterOp.lte => '$f=lte.$v',
+        FilterOp.contains => '$f=ilike.${Uri.encodeComponent('*${_likeSafe(value)}*')}',
+        FilterOp.isNull => '$f=is.null',
+        FilterOp.notNull => '$f=not.is.null',
+      };
+    }
+    return switch (op) {
+      FilterOp.eq => '$f=$v',
+      FilterOp.neq => '$f!=$v',
+      _ => null,
+    };
+  }
+
+  static String _likeSafe(String s) => s.replaceAll('*', '').replaceAll('%', '').replaceAll('&', '').replaceAll('?', '');
+
+  @override
+  String toString() => switch (op) {
+        FilterOp.eq => '$field=$value',
+        FilterOp.neq => '$field!=$value',
+        FilterOp.gt => '$field>$value',
+        FilterOp.gte => '$field>=$value',
+        FilterOp.lt => '$field<$value',
+        FilterOp.lte => '$field<=$value',
+        FilterOp.contains => '$field~$value',
+        FilterOp.isNull => '$field=null',
+        FilterOp.notNull => '$field!=null',
+      };
+}
+
 class BackendAdapter {
   final String url;
   final String apiKey;
@@ -87,39 +177,153 @@ class BackendAdapter {
   /// une reussite : exiger 200 faisait echouer la lecture des donnees.
   static bool _isSuccess(int? status) => status != null && status >= 200 && status < 300;
 
-  /// Detail lisible renvoye par le backend (PostgREST donne le nom exact
-  /// de la table manquante, Supabase l'erreur de politique RLS, ...).
-  static String _errorDetail(dynamic data) {
+  /// Code d'erreur PostgREST/Postgres si le corps en contient un
+  /// (`PGRST205`, `42P01`, `42703`, `22P02`, ...).
+  static String? _errorCode(dynamic data) {
     if (data is Map) {
-      for (final key in ['message', 'error', 'error_description', 'hint', 'details']) {
+      final c = data['code'];
+      if (c is String && c.isNotEmpty) return c;
+    }
+    return null;
+  }
+
+  /// Detail du backend, traduit en francais. Les messages PostgREST arrivent
+  /// en anglais ("Could not find the table ...") : un tel texte brut est
+  /// incomprehensible dans le chat.
+  static String _errorDetail(dynamic data) {
+    String raw = '';
+    if (data is Map) {
+      for (final key in ['message', 'detail', 'details', 'error', 'error_description', 'hint']) {
         final v = data[key];
-        if (v != null && '$v'.trim().isNotEmpty) return '$v'.trim();
+        if (v != null && '$v'.trim().isNotEmpty) {
+          raw = '$v'.trim();
+          if (key == 'message') break;
+        }
+        if (raw.isNotEmpty && key == 'message') break;
+      }
+      if (raw.isEmpty) {
+        for (final key in ['message', 'detail', 'details', 'error', 'hint']) {
+          final v = data[key];
+          if (v != null && '$v'.trim().isNotEmpty) { raw = '$v'.trim(); break; }
+        }
       }
     } else if (data is String && data.trim().isNotEmpty) {
-      final s = data.trim();
-      return s.length > 240 ? '${s.substring(0, 240)}…' : s;
+      raw = data.trim();
     }
-    return '';
+    if (raw.isEmpty) return '';
+    return _translateBackendMessage(raw);
+  }
+
+  /// Anglais du backend -> francais actionnable.
+  static String _translateBackendMessage(String raw) {
+    String s = raw;
+
+    // Table absente du schema cache PostgREST.
+    final tableMissing = RegExp(r"Could not find the table '?([^'\s]+)'?").firstMatch(s);
+    if (tableMissing != null) {
+      final t = tableMissing.group(1)!.split('.').last;
+      return 'La table "$t" n\'existe pas sur ce backend. Tapez /tables pour voir les tables disponibles.';
+    }
+    // Colonne inexistante.
+    final colMissing = RegExp(r'column ([\w.]+) does not exist').firstMatch(s);
+    if (colMissing != null) {
+      return 'La colonne "${colMissing.group(1)!.split('.').last}" n\'existe pas dans cette table.';
+    }
+    // Type de valeur incompatible (uuid, entier, ...).
+    final badType = RegExp(r'invalid input syntax for type (\w+):\s*"?([^"]*)"').firstMatch(s);
+    if (badType != null) {
+      return 'La valeur "${badType.group(2)}" n\'est pas compatible avec une colonne ${badType.group(1)}.';
+    }
+    if (s.contains('duplicate key value violates unique constraint')) {
+      return 'Cette ligne existe deja (cle en double).';
+    }
+    if (s.contains('violates row-level security')) {
+      return 'La politique RLS de votre backend refuse cette operation (row-level security policy).';
+    }
+    final permTable = RegExp(r'permission denied for (?:table|relation) ([\w.]+)').firstMatch(s);
+    if (permTable != null) {
+      return 'Acces refuse a la table "${permTable.group(1)}" (droits RLS ou cle API limitee).';
+    }
+    if (s.contains('column ') && s.contains(' is of')) return 'Le type de la colonne ne correspond pas a la valeur fournie.';
+
+    return s.length > 240 ? '${s.substring(0, 240)}\u2026' : s;
   }
 
   static String _statusLabel(int? status) => switch (status) {
-        400 => 'Requete refusee (400)',
-        401 => 'Cle API absente ou refusee (401)',
-        403 => 'Acces refuse - regles RLS ou permissions (403)',
+        400 => 'Requ\u00eate refus\u00e9e (400)',
+        401 => 'Cl\u00e9 API absente ou refus\u00e9e (401)',
+        403 => 'Acc\u00e8s refus\u00e9 \u2014 r\u00e8gles RLS ou permissions (403)',
         404 => 'Table ou ligne introuvable (404)',
-        409 => 'Conflit - ligne deja existante (409)',
-        422 => 'Valeurs invalides rejetees par le backend (422)',
-        429 => 'Trop de requetes (429)',
+        409 => 'Conflit \u2014 ligne d\u00e9j\u00e0 existante (409)',
+        422 => 'Valeurs invalides rejet\u00e9es par le backend (422)',
+        429 => 'Trop de requ\u00eates (429)',
         500 => 'Erreur interne du backend (500)',
         502 => 'Backend injoignable (502)',
         503 => 'Backend indisponible (503)',
+        504 => 'Backend trop lent \u2014 d\u00e9lai d\u00e9pass\u00e9 (504)',
         _ => 'Erreur HTTP ${status ?? 0}',
       };
 
+  /// Libelle d'erreur complet : code PostgREST traduit puis libelle HTTP.
   static String _statusError(int? status, [dynamic data]) {
+    final code = _errorCode(data);
+    switch (code) {
+      case 'PGRST205':
+      case '42P01':
+        final d = _errorDetail(data);
+        return d.isEmpty
+            ? 'Table introuvable (404) \u2014 elle n\'existe pas ou n\'est pas expos\u00e9e. Tapez /tables.'
+            : 'Table introuvable (404) \u2014 $d\nTapez /tables pour voir les tables disponibles.';
+      case 'PGRST116':
+        return 'Aucune ligne ne correspond \u00e0 ce filtre.';
+      case 'PGRST301':
+        return 'Aucune ligne \u00e0 modifier (404).';
+      case '42703':
+        final d = _errorDetail(data);
+        return d.isEmpty ? 'Colonne inexistante (400).' : 'Colonne inexistante (400) \u2014 $d';
+      case '22P02':
+        final d = _errorDetail(data);
+        return d.isEmpty
+            ? 'Valeur incompatible avec le type de la colonne (400).'
+            : 'Valeur incompatible avec le type de la colonne (400) \u2014 $d';
+    }
     final label = _statusLabel(status);
     final detail = _errorDetail(data);
-    return detail.isEmpty ? label : '$label — $detail';
+    return detail.isEmpty ? label : '$label \u2014 $detail';
+  }
+
+  /// GET tolerant : une erreur 502/503/504 est quasi toujours transitoire,
+  /// on reessaie une fois avant d'abandonner.
+  static Future<Response> _get(
+    String url, {
+    Map<String, String>? headers,
+    Duration receiveTimeout = const Duration(seconds: 15),
+    ResponseType? responseType,
+  }) async {
+    var attempt = 0;
+    while (true) {
+      attempt++;
+      try {
+        final resp = await _dio.get(
+          url,
+          options: Options(
+            headers: headers,
+            receiveTimeout: receiveTimeout,
+            responseType: responseType,
+            validateStatus: (s) => s != null && s < 500,
+          ),
+        );
+        final st = resp.statusCode ?? 0;
+        if ((st == 502 || st == 503 || st == 504) && attempt < 2) {
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+          continue;
+        }
+        return resp;
+      } on DioException {
+        if (attempt >= 2) rethrow;
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+      }
+    }
   }
 
   static Future<BackendCheckResult> check(String url, String apiKey, {String? type}) async {
@@ -186,8 +390,17 @@ class BackendAdapter {
         .catchError((_) {});
   }
 
+  /// Message lisible pour n'importe quelle exception remontee par une
+  /// commande du chat. Un stacktrace Dart brut n'a rien a faire dans l'UI.
+  static String describeError(Object e) {
+    if (e is DioException) return _humanError(e);
+    final s = '$e'.trim();
+    if (s.isEmpty) return 'Erreur inconnue.';
+    return s.length > 220 ? '${s.substring(0, 220)}…' : s;
+  }
+
   static String _humanError(DioException e) {
-    if (e.response != null) return 'Status ${e.response?.statusCode}';
+    if (e.response != null) return _statusError(e.response?.statusCode, e.response?.data);
     if (e.type == DioExceptionType.connectionTimeout) return 'Timeout - le serveur ne répond pas';
     if (e.type == DioExceptionType.connectionError) return 'Impossible de se connecter';
     if (e.type == DioExceptionType.badCertificate) return 'Certificat SSL invalide';
@@ -213,10 +426,7 @@ class BackendAdapter {
     try {
       // Source de verite : le catalogue OpenAPI de PostgREST listant
       // TOUTES les tables exposees, pas une liste devinee.
-      final resp = await _dio.get(
-        '$clean/rest/v1/',
-        options: Options(headers: headers, receiveTimeout: const Duration(seconds: 15), validateStatus: (s) => s != null && s < 500),
-      );
+      final resp = await _get('$clean/rest/v1/', headers: headers);
       if (_isSuccess(resp.statusCode) && resp.data is Map) {
         final names = _openApiTableNames(Map<String, dynamic>.from(resp.data as Map));
         if (names.isNotEmpty) return names;
@@ -299,6 +509,23 @@ class BackendAdapter {
     }
   }
 
+  /// `created_at` -> `created_at.asc`, `-created_at` -> `created_at.desc`.
+  /// Retourne null si le nom de colonne n'est pas un identifiant propre :
+  /// aucun ordre n'est alors envoye plutot qu'une requete douteuse.
+  static String? orderParam(String raw) {
+    var s = raw.trim();
+    if (s.isEmpty) return null;
+    var desc = false;
+    if (s.startsWith('-') || s.startsWith('desc:')) {
+      desc = true;
+      s = s.startsWith('desc:') ? s.substring(5) : s.substring(1);
+    } else if (s.startsWith('asc:')) {
+      s = s.substring(4);
+    }
+    if (!RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$').hasMatch(s)) return null;
+    return '$s.${desc ? 'desc' : 'asc'}';
+  }
+
   static Future<TableResult> fetchRows(
     String url,
     String apiKey,
@@ -308,21 +535,34 @@ class BackendAdapter {
     String? type,
     String? searchField,
     String? searchValue,
+    List<QueryFilter> filters = const [],
+    String? orderBy,
   }) async {
     final adapter = await BackendAdapter.create(url, apiKey, type: type);
     final clean = url.replaceAll(RegExp(r'/+$'), '');
     final headers = Map<String, String>.from(adapter.headers);
+    final supabase = adapter.type == BackendType.supabase;
 
     String target;
-    if (adapter.type == BackendType.supabase) {
+    if (supabase) {
       final q = StringBuffer('$clean/rest/v1/$table?select=*&limit=$limit&offset=$offset');
+      for (final f in filters) {
+        final p = f.toQuery(supabase: true);
+        if (p != null) q.write('&$p');
+      }
       if (searchField != null && searchField.isNotEmpty && searchValue != null) {
         q.write('&$searchField=eq.${Uri.encodeComponent(searchValue)}');
       }
+      final order = orderBy == null ? null : orderParam(orderBy);
+      if (order != null) q.write('&order=$order');
       target = q.toString();
       headers['Prefer'] = 'count=exact';
     } else {
       final q = StringBuffer('$clean/$table?limit=$limit&offset=$offset');
+      for (final f in filters) {
+        final p = f.toQuery(supabase: false);
+        if (p != null) q.write('&$p');
+      }
       if (searchField != null && searchField.isNotEmpty && searchValue != null) {
         q.write('&$searchField=${Uri.encodeComponent(searchValue)}');
       }
@@ -331,14 +571,7 @@ class BackendAdapter {
 
     try {
       final sw = DateTime.now();
-      final resp = await _dio.get(
-        target,
-        options: Options(
-          headers: headers,
-          receiveTimeout: const Duration(seconds: 15),
-          validateStatus: (s) => s != null && s < 500,
-        ),
-      );
+      final resp = await _get(target, headers: headers);
       _log('GET', target, status: resp.statusCode, ms: DateTime.now().difference(sw).inMilliseconds);
       if (!_isSuccess(resp.statusCode)) {
         return TableResult(
@@ -424,10 +657,7 @@ class BackendAdapter {
         final headers = Map<String, String>.from(adapter.headers);
         headers['Prefer'] = 'count=exact';
         final sw = DateTime.now();
-        final resp = await _dio.get(
-          target,
-          options: Options(headers: headers, receiveTimeout: const Duration(seconds: 15), validateStatus: (s) => s != null && s < 500),
-        );
+        final resp = await _get(target, headers: headers);
         _log('GET', target, status: resp.statusCode, ms: DateTime.now().difference(sw).inMilliseconds);
         if (!_isSuccess(resp.statusCode)) {
           return CountResult(table: table, error: _statusError(resp.statusCode, resp.data));
@@ -447,10 +677,7 @@ class BackendAdapter {
     // On recupere un maximum de lignes et on signale si le nombre est plafonne.
     const probeLimit = 1000;
     try {
-      final resp = await _dio.get(
-        '$clean/$table?limit=$probeLimit',
-        options: Options(headers: adapter.headers, receiveTimeout: const Duration(seconds: 20), validateStatus: (s) => s != null && s < 500),
-      );
+      final resp = await _get('$clean/$table?limit=$probeLimit', headers: adapter.headers, receiveTimeout: const Duration(seconds: 20));
       if (!_isSuccess(resp.statusCode)) {
         return CountResult(table: table, error: _statusError(resp.statusCode, resp.data));
       }
@@ -480,10 +707,7 @@ class BackendAdapter {
 
     if (adapter.type == BackendType.supabase) {
       try {
-        final resp = await _dio.get(
-          '$clean/rest/v1/',
-          options: Options(headers: adapter.headers, receiveTimeout: const Duration(seconds: 15), validateStatus: (st) => st != null && st < 500),
-        );
+        final resp = await _get('$clean/rest/v1/', headers: adapter.headers);
         if (!_isSuccess(resp.statusCode)) {
           return SchemaResult(table: table, error: _statusError(resp.statusCode, resp.data));
         }
@@ -508,10 +732,7 @@ class BackendAdapter {
       final target = adapter.type == BackendType.supabase
           ? '$clean/rest/v1/$table?select=*&limit=1'
           : '$clean/$table?limit=1';
-      final resp = await _dio.get(
-        target,
-        options: Options(headers: adapter.headers, receiveTimeout: const Duration(seconds: 15), validateStatus: (s) => s != null && s < 500),
-      );
+      final resp = await _get(target, headers: adapter.headers);
       if (_isSuccess(resp.statusCode) && resp.data is List && (resp.data as List).isNotEmpty) {
         final row = (resp.data as List).first;
         if (row is Map) {
@@ -603,11 +824,7 @@ class BackendAdapter {
     return WriteResult(method: method, url: target, statusCode: status, error: _writeError(status, data));
   }
 
-  static String _writeError(int status, dynamic data) {
-    final detail = _errorDetail(data);
-    final label = _statusLabel(status);
-    return detail.isEmpty ? label : '$label\n$detail';
-  }
+  static String _writeError(int status, dynamic data) => _statusError(status, data);
 
   static Future<WriteResult> insertRow(
     String url,
@@ -724,6 +941,81 @@ class BackendAdapter {
       );
     }
   }
+
+  /// Appel d'une fonction exposee par le backend (PostgREST `rpc`).
+  /// Le nom de fonction est valide avant tout envoi ; aucune tentative
+  /// d'injection de code n'est possible car le corps est du JSON.
+  static Future<RpcResult> callRpc(
+    String url,
+    String apiKey,
+    String fn, {
+    Map<String, dynamic>? params,
+    String? type,
+  }) async {
+    if (!RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$').hasMatch(fn)) {
+      return RpcResult(ok: false, statusCode: 400, error: 'Nom de fonction invalide : "$fn".');
+    }
+    final adapter = await BackendAdapter.create(url, apiKey, type: type);
+    final clean = url.replaceAll(RegExp(r'/+$'), '');
+    final headers = Map<String, String>.from(adapter.headers);
+    headers['Content-Type'] = 'application/json';
+    final body = <String, dynamic>{...?params};
+    final candidates = adapter.type == BackendType.supabase
+        ? ['$clean/rest/v1/rpc/$fn']
+        : ['$clean/rpc/$fn', '$clean/$fn'];
+
+    DioException? last;
+    for (var i = 0; i < candidates.length; i++) {
+      final target = candidates[i];
+      try {
+        final sw = Stopwatch()..start();
+        final resp = await _dio.post(
+          target,
+          data: body,
+          options: Options(
+            headers: headers,
+            receiveTimeout: const Duration(seconds: 20),
+            validateStatus: (s) => s != null && s < 600,
+          ),
+        );
+        _log('POST', target, status: resp.statusCode, ms: sw.elapsedMilliseconds);
+        if (_isSuccess(resp.statusCode)) {
+          return RpcResult(ok: true, statusCode: resp.statusCode ?? 200, data: resp.data);
+        }
+        if (resp.statusCode == 404 && i < candidates.length - 1) continue;
+        if (resp.statusCode == 404) {
+          return RpcResult(
+            ok: false,
+            statusCode: 404,
+            error: 'Fonction "$fn" introuvable (404) — vérifiez son nom et qu\'elle est exposée en RPC.',
+          );
+        }
+        return RpcResult(ok: false, statusCode: resp.statusCode ?? 0, error: _statusError(resp.statusCode, resp.data));
+      } on DioException catch (e) {
+        last = e;
+        if (!isOfflineError(e)) {
+          return RpcResult(
+            ok: false,
+            statusCode: e.response?.statusCode ?? 0,
+            error: _humanError(e),
+          );
+        }
+      }
+    }
+    if (last == null) {
+      return RpcResult(ok: false, statusCode: 404, error: 'Fonction "$fn" introuvable (404).');
+    }
+    return RpcResult(ok: false, statusCode: 0, error: _humanError(last), offline: true);
+  }
+}
+
+class RpcResult {
+  final bool ok;
+  final int statusCode;
+  final Object? data;
+  final String? error;
+  final bool offline;
+  const RpcResult({required this.ok, required this.statusCode, this.data, this.error, this.offline = false});
 }
 
 class BackendCheckResult {

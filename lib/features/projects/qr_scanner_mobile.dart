@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -17,7 +19,8 @@ class _MobileQrScanner extends StatefulWidget {
   State<_MobileQrScanner> createState() => _MobileQrScannerState();
 }
 
-class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerProviderStateMixin {
+class _MobileQrScannerState extends State<_MobileQrScanner>
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   MobileScannerController? _cameraController;
   bool _cameraReady = false;
   bool _hasError = false;
@@ -25,20 +28,50 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
   bool _canOpenSettings = false;
   bool _isProcessing = false;
   bool _isStarting = false;
-  bool _autoRetried = false;
+  bool _startingCamera = false;
   late AnimationController _lineController;
 
   @override
   void initState() {
     super.initState();
     _lineController = AnimationController(vsync: this, duration: const Duration(milliseconds: 1800))..repeat();
+    WidgetsBinding.instance.addObserver(this);
     _initCamera();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final controller = _cameraController;
+    if (controller == null) return;
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+      // Une camera gardee en arriere-plan est tuee par Android : au retour,
+      // le plugin tombe en NPE ("conflit temporaire"). On l'arrete proprement.
+      unawaited(_safeStop(controller));
+    } else if (state == AppLifecycleState.resumed && mounted && !_isProcessing) {
+      unawaited(_resumeCamera());
+    }
+  }
+
+  Future<void> _safeStop(MobileScannerController controller) async {
+    try {
+      await controller.stop();
+    } catch (_) {}
+  }
+
+  Future<void> _resumeCamera() async {
+    final controller = _cameraController;
+    if (controller == null || controller.value.isRunning) return;
+    _isStarting = true;
+    try {
+      await _startWithRetry(controller);
+    } finally {
+      _isStarting = false;
+    }
   }
 
   Future<void> _initCamera() async {
     if (_isStarting) return;
     _isStarting = true;
-
     try {
       var status = await Permission.camera.status;
       if (!status.isGranted && !status.isLimited) {
@@ -59,121 +92,149 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
       }
 
       await _teardownController();
-      _cameraController = _newController();
-
       if (!mounted) return;
-      setState(() { _isStarting = false; _hasError = false; _errorMsg = ''; });
 
-      // Le widget MobileScanner demarre la camera lui-meme (autoStart).
-      // On l'attend, sinon l'apercu reste noir.
-      Future.delayed(const Duration(seconds: 8), () {
-        if (!mounted || _cameraReady || _hasError) return;
-        setState(() {
-          _hasError = true;
-          _cameraReady = false;
-          _errorMsg = 'La camera n\'a pas demarre.\nReessayez, ou collez le code.';
-        });
-      });
-      return;
+      final controller = _newController();
+      _cameraController = controller;
+      setState(() { _hasError = false; _cameraReady = false; _errorMsg = ''; });
+
+      // La camera demarre une seule fois, sous notre controle.
+      await _startWithRetry(controller);
     } catch (e) {
       if (mounted) {
-        setState(() {
-          _hasError = true;
-          _isStarting = false;
-          _errorMsg = _humanizeError(e);
-        });
+        setState(() { _hasError = true; _cameraReady = false; _errorMsg = _humanizeStartError(e); });
       }
+    } finally {
+      _isStarting = false;
     }
   }
 
   MobileScannerController _newController() {
-    final c = MobileScannerController(
-      detectionSpeed: DetectionSpeed.normal,
+    final controller = MobileScannerController(
+      // autoStart:false -> c'est nous qui appelons start()/stop(). Le widget
+      // sinon arrete la camera a chaque remontee de l'arbre, pendant que
+      // notre propre teardown la libere : c'est la course qui donnait le NPE.
+      autoStart: false,
+      detectionSpeed: DetectionSpeed.noDuplicates,
       facing: CameraFacing.back,
       torchEnabled: false,
-      formats: [BarcodeFormat.qrCode],
+      formats: const <BarcodeFormat>[BarcodeFormat.qrCode],
     );
-    c.addListener(_onControllerChanged);
-    return c;
+    controller.addListener(_onControllerChanged);
+    return controller;
   }
 
-  /// Detache le widget AVANT de liberer le controleur : relacher la camera
-  /// pendant que MobileScanner l'utilise provoque exactement le NPE
-  /// "Attempt to invoke virtual method ... on a null object reference".
+  /// Demontre le widget AVANT de liberer le controleur.
   Future<void> _teardownController() async {
     final old = _cameraController;
     if (old == null) return;
     _cameraController = null;
-    if (mounted) setState(() {});
-    await Future.delayed(const Duration(milliseconds: 150));
-    try {
-      old.removeListener(_onControllerChanged);
-    } catch (_) {}
-    try {
-      await old.dispose();
-    } catch (_) {}
+    if (mounted) {
+      setState(() {});
+      await WidgetsBinding.instance.endOfFrame;
+    }
+    try { old.removeListener(_onControllerChanged); } catch (_) {}
+    await _safeStop(old);
+    try { await old.dispose(); } catch (_) {}
   }
 
-  Future<void> _restartCamera() async {
-    if (_isStarting) return;
-    _isStarting = true;
-    await _teardownController();
-    if (!mounted) {
-      _isStarting = false;
-      return;
+  /// Jusqu'a 3 tentatives : le NPE de depart est un conflit de CameraX, il
+  /// disparait des que la camera est relancee proprement.
+  Future<void> _startWithRetry(MobileScannerController controller) async {
+    _startingCamera = true;
+    Object? lastError;
+    try {
+      for (var attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+          // Remise a zero complete de la camera native entre deux essais.
+          await _safeStop(controller);
+          await Future<void>.delayed(Duration(milliseconds: 350 * attempt));
+        }
+        if (!mounted || !identical(_cameraController, controller)) return;
+        try {
+          await controller.start().timeout(const Duration(seconds: 10));
+          if (mounted && identical(_cameraController, controller)) {
+            setState(() { _cameraReady = true; _hasError = false; _errorMsg = ''; });
+          }
+          return;
+        } on TimeoutException catch (e) {
+          lastError = e;
+        } on MobileScannerException catch (e) {
+          lastError = e;
+          if (e.errorCode == MobileScannerErrorCode.permissionDenied ||
+              e.errorCode == MobileScannerErrorCode.unsupported) {
+            break; // reessayer n'a aucun sens
+          }
+        } catch (e) {
+          lastError = e;
+        }
+      }
+    } finally {
+      _startingCamera = false;
     }
-    _cameraController = _newController();
-    setState(() {
-      _isStarting = false;
-      _cameraReady = false;
-      _hasError = false;
-      _errorMsg = '';
-    });
+
+    if (mounted && identical(_cameraController, controller)) {
+      setState(() {
+        _hasError = true;
+        _cameraReady = false;
+        _canOpenSettings = lastError is MobileScannerException &&
+            lastError.errorCode == MobileScannerErrorCode.permissionDenied;
+        _errorMsg = _humanizeStartError(lastError);
+      });
+    }
   }
 
   void _onControllerChanged() {
-    if (!mounted || _isProcessing) return;
+    if (!mounted) return;
     final controller = _cameraController;
     if (controller == null) return;
+
+    if (_startingCamera) {
+      // Les erreurs de demarrage sont traitees par _startWithRetry, on se
+      // contente d'afficher le succes.
+      if (controller.value.error == null && controller.value.isRunning && !_cameraReady) {
+        setState(() { _cameraReady = true; _hasError = false; _errorMsg = ''; });
+      }
+      return;
+    }
+
     final error = controller.value.error;
     if (error != null) {
-      // Un NPE interne au plugin n'est pas définitif : une relance propre
-      // de la camera suffit dans la très grande majorité des cas.
-      if (!_autoRetried && error.errorCode == MobileScannerErrorCode.genericError) {
-        _autoRetried = true;
-        Future.delayed(const Duration(milliseconds: 300), () {
-          if (mounted) _restartCamera();
-        });
-        return;
-      }
       setState(() {
         _hasError = true;
         _cameraReady = false;
         _canOpenSettings = error.errorCode == MobileScannerErrorCode.permissionDenied;
-        _errorMsg = _humanizeScannerError(error);
+        _errorMsg = _humanizeStartError(error);
       });
     } else if (controller.value.isRunning && !_cameraReady) {
       setState(() { _cameraReady = true; _hasError = false; });
     }
   }
 
-  String _humanizeScannerError(MobileScannerException e) {
-    switch (e.errorCode) {
-      case MobileScannerErrorCode.permissionDenied:
-        return 'Permission camera refusee.\nAutorisez l\'acces a la camera pour scanner un QR Code.';
-      case MobileScannerErrorCode.unsupported:
-        return 'Le scanner QR n\'est pas pris en charge sur cet appareil.';
-      case MobileScannerErrorCode.controllerDisposed:
-      case MobileScannerErrorCode.controllerAlreadyInitialized:
-      case MobileScannerErrorCode.controllerUninitialized:
-        return 'Le scanner a ete interrompu.\nTouchez Reessayer.';
-      case MobileScannerErrorCode.genericError:
-        final details = (e.errorDetails?.message ?? '').trim();
-        if (details.isEmpty || details.contains('Attempt to invoke') || details.contains('null object')) {
-          return 'La camera n\'a pas pu demarrer (conflit temporaire).\nTouchez Reessayer, ou collez le code.';
-        }
-        return 'Camera: $details';
+  String _humanizeStartError(Object? e) {
+    if (e is TimeoutException) {
+      return 'La camera met trop de temps a repondre.\nFermez les autres applications camera, puis touchez Reessayer.';
     }
+    if (e is MobileScannerException) {
+      switch (e.errorCode) {
+        case MobileScannerErrorCode.permissionDenied:
+          return 'Permission camera refusee.\nAutorisez l\'acces a la camera pour scanner un QR Code.';
+        case MobileScannerErrorCode.unsupported:
+          return 'Le scanner QR n\'est pas pris en charge sur cet appareil.';
+        case MobileScannerErrorCode.controllerDisposed:
+        case MobileScannerErrorCode.controllerAlreadyInitialized:
+        case MobileScannerErrorCode.controllerUninitialized:
+          return 'Le scanner a ete interrompu.\nTouchez Reessayer.';
+        case MobileScannerErrorCode.genericError:
+          final details = '${e.errorDetails?.message ?? e.errorDetails?.details ?? ''}'.trim();
+          if (details.isEmpty || details.contains('Attempt to invoke') || details.contains('null object')) {
+            return 'La camera n\'a pas pu demarrer.\nFermez les autres applications qui utilisent la camera, puis touchez Reessayer.';
+          }
+          return 'Camera: $details';
+      }
+    }
+    if (e == null) return 'La camera n\'a pas pu demarrer.\nTouchez Reessayer, ou collez le code.';
+    return _humanizeError(e);
   }
 
   String _humanizeError(Object e) {
@@ -182,9 +243,9 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
       return 'Permission camera refusee.\nAutorisez l\'acces dans les parametres.';
     }
     if (msg.contains('Attempt to invoke') || msg.contains('null object')) {
-      return 'La camera n\'a pas pu demarrer (conflit temporaire).\nTouchez Reessayer, ou collez le code.';
+      return 'La camera n\'a pas pu demarrer.\nFermez les autres applications camera, puis touchez Reessayer.';
     }
-    if (msg.contains('camera') || msg.contains('Camera')) {
+    if (msg.toLowerCase().contains('camera')) {
       return 'Camera non disponible.';
     }
     return 'Erreur: $msg';
@@ -268,11 +329,15 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     final old = _cameraController;
     _cameraController = null;
     if (old != null) {
       try {
         old.removeListener(_onControllerChanged);
+      } catch (_) {}
+      try {
+        old.stop();
       } catch (_) {}
       try {
         old.dispose();
@@ -291,7 +356,8 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
     final legacy = payload == null ? InvitePayload.legacyProjectId(raw) : null;
     if (payload == null && legacy == null) return;
     _isProcessing = true;
-    _cameraController?.stop();
+    final controller = _cameraController;
+    if (controller != null) unawaited(_safeStop(controller));
     HapticFeedback.heavyImpact();
     Navigator.pop(context);
     widget.onScanned(raw);
@@ -447,7 +513,6 @@ class _MobileQrScannerState extends State<_MobileQrScanner> with SingleTickerPro
             ),
           GestureDetector(
             onTap: () {
-              _autoRetried = false;
               setState(() { _hasError = false; _cameraReady = false; _errorMsg = ''; });
               _initCamera();
             },

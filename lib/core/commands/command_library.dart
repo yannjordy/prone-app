@@ -40,6 +40,13 @@ class CommandLibrary {
       category: 'System',
       icon: 'assets/icons/grid.svg',
     ),
+    Command(
+      name: 'env',
+      description: 'Baser entre dev / prod (protection des ecritures)',
+      category: 'System',
+      icon: 'assets/icons/globe.svg',
+      params: ['nom'],
+    ),
 
     // Database
     Command(
@@ -88,6 +95,20 @@ class CommandLibrary {
       category: 'Database',
       icon: 'assets/icons/search.svg',
       params: ['table', 'champ', 'valeur'],
+    ),
+    Command(
+      name: 'query',
+      description: 'Filtrer une table (operateurs = != > >= < <= ~)',
+      category: 'Database',
+      icon: 'assets/icons/grid.svg',
+      params: ['table', 'champ=valeur', 'order=-champ', 'limit=N'],
+    ),
+    Command(
+      name: 'rpc',
+      description: 'Appeler une fonction du backend',
+      category: 'Database',
+      icon: 'assets/icons/zap.svg',
+      params: ['fonction', 'param=valeur'],
     ),
 
     // Ecriture

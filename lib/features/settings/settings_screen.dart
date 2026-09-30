@@ -34,6 +34,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
     setState(() {
       _notifEnabled = prefs.getBool('settings_notif_enabled') ?? true;
       _pushEnabled = prefs.getBool('settings_push_enabled') ?? true;
